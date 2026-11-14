@@ -2961,7 +2961,7 @@ BDN_TOOL_ROOT = os.path.join(
 SEVEN_ZIP_URL = 'https://www.7-zip.org/a/7zr.exe'
 GITHUB_RELEASES_API = 'https://api.github.com/repos/{repo}/releases?per_page=20'
 TOOLS_USER_AGENT = 'ohMyAssNoto/1.0'
-APP_UPDATE_REPO = 'Toad1024/ohMyAss'
+APP_UPDATE_REPO = 'cmct/ohMyAss'
 APP_UPDATE_ASSET = 'ohMyAss Noto.exe'
 BDN_TOOL_SPECS = {
     'ass2bdnxml': {
