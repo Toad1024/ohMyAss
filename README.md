@@ -50,7 +50,7 @@
 
 ### 方式一：下载发布版
 
-到 [Releases](https://github.com/Toad1024/ohMyAss/releases) 下载 `ohMyAss Noto.exe`，双击运行。
+到 [Releases](https://github.com/Toad1024/ohMyAss/releases) 下载最新的发布版，双击运行。
 
 ### 方式二：从源码运行
 
