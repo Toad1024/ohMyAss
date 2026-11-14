@@ -1,0 +1,50 @@
+# ===== 打包产物（不进库，发布用 GitHub Releases）=====
+/*.exe
+/build/
+/dist/
+*.spec
+*.pyz
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+*.so
+.venv/
+venv/
+env/
+ENV/
+.eggs/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# ===== 缓存 / 临时文件 =====
+*.log
+*.tmp
+*.bak
+*.orig
+*.rej
+.cache/
+tmp/
+temp/
+
+# ===== 编辑器 / 操作系统 =====
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ===== 本地配置 / 敏感信息 =====
+.env
+.env.*
+config.local.*
+*.pem
+*.key
+secrets.*
