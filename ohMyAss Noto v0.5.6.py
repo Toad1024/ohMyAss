@@ -102,7 +102,7 @@ OUT_CHT = '繁体中文'
 OUT_ENG = '英文'
 
 APP_NAME = 'ohMyAss Noto'
-APP_VERSION = 'v0.5.5'
+APP_VERSION = 'v0.5.6'
 
 # WinUI / FlowEncode 主题令牌（Light）
 UI_BG = '#eef1f6'
@@ -1082,7 +1082,7 @@ def get_output_dir(source_file: str, title: str, output_root: str = ''):
         base = os.path.dirname(os.path.abspath(source_file))
     return os.path.join(base, folder_name)
 
-CONFIG_PATH = os.path.join(os.path.expanduser('~'), '.cmct_style_adjustment_v2.json')
+CONFIG_PATH = os.path.join(os.path.expanduser('~'), 'ohMyAssNoto.json')
 
 def load_config() -> dict:
     try:
@@ -2685,7 +2685,7 @@ class BlackBarDetectorWindow:
         self.master = master
         self.on_mid_black = on_mid_black
         self.window = tk.Toplevel(master)
-        self.window.title("CMCT 黑边检测")
+        self.window.title("ohMyAss Noto 黑边检测")
         self.window.geometry("640x700")
         self.window.minsize(540, 560)
         try:
@@ -2961,6 +2961,8 @@ BDN_TOOL_ROOT = os.path.join(
 SEVEN_ZIP_URL = 'https://www.7-zip.org/a/7zr.exe'
 GITHUB_RELEASES_API = 'https://api.github.com/repos/{repo}/releases?per_page=20'
 TOOLS_USER_AGENT = 'ohMyAssNoto/1.0'
+APP_UPDATE_REPO = 'Toad1024/ohMyAss'
+APP_UPDATE_ASSET = 'ohMyAss Noto.exe'
 BDN_TOOL_SPECS = {
     'ass2bdnxml': {
         'label': 'ass2bdnxml',
@@ -3336,6 +3338,113 @@ def _fallback_candidates(repo: str, spec: dict, log=None):
             log('在线获取失败，改用上次缓存的版本信息')
         return cached
     raise RuntimeError('；'.join(errors))
+
+
+def _version_tuple(value: str):
+    numbers = re.findall(r'\d+', str(value or ''))
+    return tuple(int(number) for number in numbers[:4]) or (0,)
+
+
+def _app_assets_from_page(repo: str, tag: str):
+    page = _tools_request(
+        f'https://github.com/{repo}/releases/expanded_assets/{urllib.parse.quote(tag)}',
+        timeout=60,
+    ).read().decode('utf-8', 'replace')
+    assets = []
+    seen = set()
+    for href in re.findall(r'href="(/[^"]+/releases/download/[^"]+)"', page):
+        url = 'https://github.com' + href
+        name = urllib.parse.unquote(url.rsplit('/', 1)[-1])
+        lower = name.lower()
+        if lower.endswith('.exe') and 'ohmyass' in lower and url not in seen:
+            seen.add(url)
+            assets.append((name, url))
+    return assets
+
+
+def fetch_app_update():
+    """返回 (最新版本号, 下载地址, 资源文件名)。"""
+    repo = APP_UPDATE_REPO
+    tag = ''
+    assets = []
+    try:
+        request = urllib.request.Request(
+            f'https://api.github.com/repos/{repo}/releases/latest',
+            headers={'User-Agent': TOOLS_USER_AGENT},
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            data = json.loads(response.read().decode('utf-8'))
+        tag = str(data.get('tag_name') or '')
+        for asset in data.get('assets') or []:
+            name = str(asset.get('name') or '')
+            url = str(asset.get('browser_download_url') or '')
+            lower = name.lower()
+            if lower.endswith('.exe') and 'ohmyass' in lower and url:
+                assets.append((name, url))
+    except Exception:
+        tag = ''
+    if not tag:
+        tag = _html_latest_tag(repo)
+    if not assets:
+        assets = _app_assets_from_page(repo, tag)
+    if not assets:
+        name = APP_UPDATE_ASSET
+        url = (f'https://github.com/{repo}/releases/latest/download/'
+               f'{urllib.parse.quote(name)}')
+        assets = [(name, url)]
+    for name, url in assets:
+        if name.lower() == APP_UPDATE_ASSET.lower():
+            return tag, url, name
+    return tag, assets[0][1], assets[0][0]
+
+
+def download_app_update(url: str, log=None, timeout: int = 900):
+    folder = tempfile.mkdtemp(prefix='oma_update_')
+    destination = os.path.join(folder, APP_UPDATE_ASSET)
+    download_file(url, destination, log=log, timeout=timeout)
+    return destination
+
+
+def apply_app_update(new_exe: str):
+    """用批处理等待当前进程退出后替换 EXE 并重启。"""
+    if not getattr(sys, 'frozen', False):
+        return False, '源码运行模式无法自动替换'
+    current = os.path.abspath(sys.executable)
+    folder = os.path.dirname(current)
+    try:
+        if not os.access(folder, os.W_OK):
+            return False, '程序目录没有写入权限，请手动下载替换'
+    except OSError:
+        return False, '无法访问程序目录'
+    script = os.path.join(tempfile.gettempdir(), 'oma_update.bat')
+    content = (
+        '@echo off\r\n'
+        'setlocal\r\n'
+        f'set "PID={os.getpid()}"\r\n'
+        f'set "TARGET={current}"\r\n'
+        f'set "SOURCE={new_exe}"\r\n'
+        'set /a tries=0\r\n'
+        ':wait\r\n'
+        'tasklist /FI "PID eq %PID%" 2>nul | find "%PID%" >nul\r\n'
+        'if errorlevel 1 goto replace\r\n'
+        'ping -n 2 127.0.0.1 >nul\r\n'
+        'set /a tries+=1\r\n'
+        'if %tries% GEQ 90 goto replace\r\n'
+        'goto wait\r\n'
+        ':replace\r\n'
+        'copy /Y "%SOURCE%" "%TARGET%" >nul\r\n'
+        'if not errorlevel 1 start "" "%TARGET%"\r\n'
+        'del "%~f0"\r\n'
+    )
+    try:
+        with open(script, 'w', encoding='mbcs', errors='replace') as handle:
+            handle.write(content)
+        flags = (getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+                 | getattr(subprocess, 'DETACHED_PROCESS', 0))
+        subprocess.Popen(['cmd', '/c', script], creationflags=flags, close_fds=True)
+    except OSError as exc:
+        return False, str(exc)
+    return True, ''
 
 
 def _tool_asset_candidates(releases: list, spec: dict):
@@ -5021,6 +5130,10 @@ class App:
         self.processing = False
         self.result_queue = queue.Queue()
         self.nav_photo_cache = {}
+        self.app_update_checking = False
+        self.app_update_latest = ''
+        self.app_update_url = ''
+        self.app_update_queue = queue.Queue()
         self.initWidgets()
         config = load_config()
         self.title.set_value(config.get('title', ''))
@@ -5028,6 +5141,9 @@ class App:
         self.use_taiwan.set(bool(config.get('taiwan', True)))
         self.hdr_brightness.set(str(config.get('hdr_brightness', int(HDR_SUB_BRIGHTNESS))))
         self.update_brightness_state()
+        self.root.after(200, self._poll_app_update)
+        if getattr(sys, 'frozen', False):
+            self.root.after(2500, lambda: self.check_app_update(silent=True))
 
     def _virtual_screen_bounds(self):
         try:
@@ -5093,6 +5209,9 @@ class App:
         if getattr(self, 'fixer_panel', None) and self.fixer_panel.dirty:
             if not messagebox.askyesno('未保存', '问题修复的修改尚未生成，确定要退出吗？', parent=self.root):
                 return
+        self._save_config_and_destroy()
+
+    def _save_config_and_destroy(self):
         config = load_config()
         config.update({
             'title': self.title.get_value(),
@@ -5498,6 +5617,29 @@ class App:
     def build_settings_page(self, main):
         create_hero(main, '设置', '工具、字体与在线更新').pack(fill='x', pady=(0, 10))
 
+        update_outer, update_card = create_card(main, '软件更新')
+        update_outer.pack(fill='x', pady=(0, 10))
+        update_card.columnconfigure(0, weight=1)
+
+        tk.Label(
+            update_card, text=f'当前版本 {APP_VERSION}', bg=UI_CARD, fg=UI_TEXT,
+            font=(UI_FONT, UI_BODY_SIZE),
+        ).grid(row=0, column=0, sticky='w')
+        self.btn_app_update = ttk.Button(
+            update_card, text='检查软件更新', command=self.check_app_update,
+            style='Secondary.TButton')
+        self.btn_app_update.grid(row=0, column=1, sticky='e')
+
+        self.app_update_status = tk.StringVar(value='启动时会自动检查更新')
+        tk.Label(
+            update_card, textvariable=self.app_update_status, bg=UI_CARD, fg=UI_MUTED,
+            font=(UI_FONT, UI_SMALL_SIZE), wraplength=680, justify='left',
+        ).grid(row=1, column=0, columnspan=2, sticky='w', pady=(8, 0))
+
+        self.app_update_progress = ttk.Progressbar(
+            update_card, style='Blue.Horizontal.TProgressbar', orient='horizontal', mode='determinate')
+        self.app_update_progress.grid(row=2, column=0, columnspan=2, sticky='ew', pady=(8, 0))
+
         card_outer, card = create_card(main, '工具（在线更新）')
         card_outer.pack(fill='x')
         card.columnconfigure(0, weight=1)
@@ -5613,6 +5755,115 @@ class App:
             pass
         self.root.after(100, self._poll_font)
 
+    def check_app_update(self, silent=False):
+        if getattr(self, 'app_update_checking', False):
+            return
+        self.app_update_checking = True
+        self.btn_app_update.config(state='disabled', text='检查中…')
+        self.app_update_status.set('正在检查软件更新…')
+        self.app_update_progress['value'] = 0
+
+        def worker():
+            try:
+                tag, url, name = fetch_app_update()
+                self.app_update_queue.put(('checked', tag, url, name, '', silent))
+            except Exception as exc:
+                self.app_update_queue.put(
+                    ('checked', '', '', '', str(exc), silent))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _poll_app_update(self):
+        try:
+            while True:
+                item = self.app_update_queue.get_nowait()
+                kind = item[0]
+                if kind == 'checked':
+                    self._app_update_checked(*item[1:])
+                elif kind == 'progress':
+                    self._app_update_progress(item[1])
+                elif kind == 'downloaded':
+                    self._app_update_downloaded(item[1])
+                elif kind == 'failed':
+                    self._app_update_failed(item[1])
+        except queue.Empty:
+            pass
+        self.root.after(150, self._poll_app_update)
+
+    def _app_update_progress(self, text):
+        self.app_update_status.set(text)
+        match = re.search(r'下载中 (\d+)%', text)
+        if match:
+            self.app_update_progress['value'] = int(match.group(1))
+
+    def _app_update_checked(self, tag, url, name, error, silent):
+        self.app_update_checking = False
+        self.btn_app_update.config(state='normal', text='检查软件更新')
+        if error:
+            self.app_update_status.set('检查失败：' + error)
+            if not silent:
+                messagebox.showerror('检查更新失败', error, parent=self.root)
+            return
+        self.app_update_latest = tag
+        self.app_update_url = url
+        if _version_tuple(tag) <= _version_tuple(APP_VERSION):
+            self.app_update_status.set(f'已是最新版本（{APP_VERSION}）')
+            if not silent:
+                messagebox.showinfo('软件更新', f'当前已是最新版本 {APP_VERSION}', parent=self.root)
+            return
+        self.app_update_status.set(f'发现新版本 {tag}')
+        if not getattr(sys, 'frozen', False):
+            if not silent:
+                messagebox.showinfo(
+                    '软件更新',
+                    f'发现新版本 {tag}。\n当前为源码运行模式，无法自动替换，请手动下载。',
+                    parent=self.root)
+            return
+        if messagebox.askyesno(
+                '发现新版本',
+                f'发现新版本 {tag}（当前 {APP_VERSION}），是否下载并更新？',
+                parent=self.root):
+            self._start_app_update_download()
+
+    def _start_app_update_download(self):
+        if not self.app_update_url:
+            return
+        self.switch_tab('settings')
+        self.btn_app_update.config(state='disabled', text='下载中…')
+        self.app_update_status.set('正在下载更新…')
+        self.app_update_progress['value'] = 0
+
+        def worker():
+            try:
+                destination = download_app_update(
+                    self.app_update_url,
+                    log=lambda text: self.app_update_queue.put(('progress', text)))
+                self.app_update_queue.put(('downloaded', destination))
+            except Exception as exc:
+                self.app_update_queue.put(('failed', str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _app_update_downloaded(self, path):
+        self.btn_app_update.config(state='normal', text='检查软件更新')
+        self.app_update_progress['value'] = 100
+        self.app_update_status.set('更新已下载完成')
+        if not messagebox.askyesno(
+                '更新就绪', '新版本已下载，是否立即重启并完成更新？', parent=self.root):
+            return
+        ok, message = apply_app_update(path)
+        if not ok:
+            self.app_update_status.set('更新失败：' + message)
+            messagebox.showerror('更新失败', message, parent=self.root)
+            return
+        self._save_config_and_destroy()
+
+    def _app_update_failed(self, message):
+        self.btn_app_update.config(state='normal', text='检查软件更新')
+        self.app_update_progress['value'] = 0
+        self.app_update_status.set('下载失败：' + message)
+        messagebox.showerror('下载失败', message, parent=self.root)
+
     def update_tools(self):
         if getattr(self, 'sup_panel', None) and self.sup_panel.running:
             messagebox.showinfo('提示', '正在生成字幕，请稍候再更新工具', parent=self.root)
@@ -5712,7 +5963,7 @@ class App:
             result = process_file(file_name, is_hdr, is_mid_black, meta)
             error = None
         except Exception as exc:
-            log_path = os.path.join(os.path.dirname(os.path.abspath(file_name)), 'style_adjustment_error.log')
+            log_path = os.path.join(os.path.dirname(os.path.abspath(file_name)), 'ohMyAssNoto_error.log')
             try:
                 with open(log_path, 'w', encoding='utf-8') as f:
                     f.write(traceback.format_exc())
@@ -5735,7 +5986,7 @@ class App:
         if error:
             messagebox.showerror(
                 "生成失败",
-                f"生成失败：{error}\n\n详细信息请查看源文件目录下的 style_adjustment_error.log",
+                f"生成失败：{error}\n\n详细信息请查看源文件目录下的 ohMyAssNoto_error.log",
                 parent=self.root,
             )
             return

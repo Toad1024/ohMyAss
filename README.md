@@ -4,7 +4,7 @@
 
 ![ohMyAss Noto](ohMyAss%20Noto.png)
 
-> 当前版本：**v0.5.5** ｜ 平台：Windows 10 / 11（x64）
+> 当前版本：**v0.5.6** ｜ 平台：Windows 10 / 11（x64）
 
 ---
 
@@ -50,7 +50,7 @@
 
 ### 方式一：下载发布版
 
-到 [Releases](https://github.com/Toad1024/ohMyAss/releases) 下载 `ohMyAss Noto v0.5.5.exe`，双击运行。
+到 [Releases](https://github.com/Toad1024/ohMyAss/releases) 下载 `ohMyAss Noto.exe`，双击运行。
 
 ### 方式二：从源码运行
 
@@ -58,7 +58,7 @@
 pip install pillow zhconv tkinterdnd2
 
 # 注意文件名带空格，必须加引号
-python "ohMyAss Noto v0.5.5.py"
+python "ohMyAss Noto v0.5.6.py"
 ```
 
 ---
@@ -112,7 +112,7 @@ HDR 模式额外产出 SDR 对照版本（如 `2-简英双语-SDR-zh.ass`），�
 ## 目录结构
 
 ```
-ohMyAss Noto v0.5.5.py   主程序（单文件）
+ohMyAss Noto v0.5.6.py   主程序（单文件）
 ohMyAss Noto.ico         应用图标
 ohMyAss Noto.png         展示图
 version_info.txt         PyInstaller 版本资源
@@ -169,6 +169,14 @@ bin/                     图形字幕运行时依赖
 ---
 
 ## 更新日志
+
+### v0.5.6
+
+- 全新线性图标套件：房屋 / 铅笔 / 扳手 / 照相机 / 齿轮，统一尺寸与线宽
+- 首页新增「设置」卡片，问题修复副标题更新
+- 窗口记住上次关闭位置，并在屏幕工作区内恢复（避开任务栏）
+- 新增软件自身在线更新：启动自动检查 + 设置页手动检查，下载后自动替换重启
+- 移除旧项目命名：配置文件改为 ohMyAssNoto.json，错误日志改为 ohMyAssNoto_error.log
 
 ### v0.5.5
 
