@@ -104,7 +104,7 @@ OUT_ENG = '英文'
 APP_NAME = 'ohMyAss Noto'
 APP_VERSION = 'v0.5.6'
 
-# WinUI / FlowEncode 主题令牌（Light）
+# WinUI 主题令牌（Light）
 UI_BG = '#eef1f6'
 UI_CARD = '#ffffff'
 UI_BORDER = '#e3e3e3'
