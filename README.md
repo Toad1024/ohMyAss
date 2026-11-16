@@ -4,7 +4,7 @@
 
 ![ohMyAss Noto](ohMyAss%20Noto.png)
 
-> 当前版本：**v0.5.9** ｜ 平台：Windows 10 / 11（x64）
+> 当前版本：**v0.5.10** ｜ 平台：Windows 10 / 11（x64）
 
 ---
 
@@ -58,7 +58,7 @@
 pip install pillow zhconv tkinterdnd2
 
 # 入口文件名带空格，必须加引号
-python "ohMyAss Noto v0.5.9.py"
+python "ohMyAss Noto v0.5.10.py"
 ```
 
 ---
@@ -112,7 +112,7 @@ HDR 模式额外产出 SDR 对照版本（如 `2-简英双语-SDR-zh.ass`），�
 ## 目录结构
 
 ```
-ohMyAss Noto v0.5.9.py   入口：单实例检查、主窗口启动
+ohMyAss Noto v0.5.10.py   入口：单实例检查、主窗口启动
 app_info.py              版本号与资源路径
 config_store.py          配置、错误日志、路径工具
 download_utils.py        下载与发布页解析
@@ -210,6 +210,14 @@ python -m unittest discover -s tests -v
 ---
 
 ## 更新日志
+
+### v0.5.10
+
+- 修复更新重启后弹出「Failed to load Python DLL」的问题
+  - 原因：更新批处理继承了旧进程的 `_PYI_APPLICATION_HOME_DIR` 等 PyInstaller 变量，新实例误以为已解压并复用旧临时目录，旧进程退出删除目录后 `python311.dll` 就找不到了
+  - 更新时同时从 Python 环境和批处理中清除 `_PYI_*`、`_MEIPASS2`
+- 更新下载完成弹窗改为「是否立即重启软件并完成更新」
+- ⚠️ v0.5.9 及更早版本的更新器本身有缺陷，升级到本版本需要手动覆盖安装一次；从 v0.5.10 起自动更新正常
 
 ### v0.5.9
 

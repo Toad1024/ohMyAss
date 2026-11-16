@@ -223,6 +223,22 @@ class UpdateScriptTests(unittest.TestCase):
         self.assertNotIn(b'\r\r\n', data)
         self.assertNotIn(b'\n', data.replace(b'\r\n', b''))
 
+    def test_update_environment_removes_pyinstaller_vars(self):
+        import app_update
+
+        base = {
+            'PATH': 'x',
+            '_PYI_APPLICATION_HOME_DIR': r'C:\Temp\_MEI123',
+            '_PYI_ARCHIVE_FILE': r'C:\app.exe',
+            '_PYI_PARENT_PROCESS_LEVEL': '1',
+            '_MEIPASS2': r'C:\Temp\_MEI456',
+            'NORMAL': '1',
+        }
+        env = app_update.update_environment(base)
+        self.assertEqual(env, {'PATH': 'x', 'NORMAL': '1'})
+        self.assertIn('set "_PYI_APPLICATION_HOME_DIR="',
+                      app_update.build_app_update_script())
+
 
 class ConfigTests(unittest.TestCase):
     def test_config_roundtrip_and_error_log(self):

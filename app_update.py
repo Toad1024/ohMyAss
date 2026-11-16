@@ -80,11 +80,39 @@ def download_app_update(url: str, log=None, timeout: int = 900):
     return destination
 
 
+PYINSTALLER_ENV_KEYS = (
+    '_PYI_APPLICATION_HOME_DIR',
+    '_PYI_ARCHIVE_FILE',
+    '_PYI_PARENT_PROCESS_LEVEL',
+    '_PYI_SPLASH_IPC',
+    '_PYI_ONEFILE_PARENT_PID',
+    '_MEIPASS2',
+)
+
+
+def update_environment(base=None) -> dict:
+    """复制环境变量并移除 PyInstaller 单文件模式注入的项。
+
+    这些变量指向旧进程的 _MEI 解压目录；若传给新实例，新实例会直接复用
+    该目录，旧进程退出删除目录后就会报 Failed to load Python DLL。
+    """
+    env = dict(os.environ if base is None else base)
+    for key in list(env):
+        if key in PYINSTALLER_ENV_KEYS or key.startswith('_PYI'):
+            env.pop(key, None)
+    return env
+
+
 def build_app_update_script() -> str:
     """生成更新批处理内容（纯 ASCII，路径全部通过环境变量传入）。"""
     lines = [
         '@echo off',
         'setlocal EnableExtensions',
+        'set "_PYI_APPLICATION_HOME_DIR="',
+        'set "_PYI_ARCHIVE_FILE="',
+        'set "_PYI_PARENT_PROCESS_LEVEL="',
+        'set "_PYI_SPLASH_IPC="',
+        'set "_MEIPASS2="',
         'echo [%date% %time%] update start>>"%LOG%"',
         'echo pid %PID%>>"%LOG%"',
         'echo target "%TARGET%">>"%LOG%"',
@@ -148,7 +176,7 @@ def apply_app_update(new_exe: str):
     log_path = os.path.join(folder, 'ohMyAssNoto_update.log')
     script = os.path.join(tempfile.gettempdir(), f'oma_update_{os.getpid()}.bat')
     content = build_app_update_script()
-    env = dict(os.environ)
+    env = update_environment()
     env.update({
         'PID': str(os.getpid()),
         'TARGET': current,
