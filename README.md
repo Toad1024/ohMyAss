@@ -4,7 +4,7 @@
 
 ![ohMyAss Noto](ohMyAss%20Noto.png)
 
-> 当前版本：**v0.5.10** ｜ 平台：Windows 10 / 11（x64）
+> 当前版本：**v0.5.11** ｜ 平台：Windows 10 / 11（x64）
 
 ---
 
@@ -58,7 +58,7 @@
 pip install pillow zhconv tkinterdnd2
 
 # 入口文件名带空格，必须加引号
-python "ohMyAss Noto v0.5.10.py"
+python "ohMyAss Noto v0.5.11.py"
 ```
 
 ---
@@ -112,7 +112,7 @@ HDR 模式额外产出 SDR 对照版本（如 `2-简英双语-SDR-zh.ass`），�
 ## 目录结构
 
 ```
-ohMyAss Noto v0.5.10.py   入口：单实例检查、主窗口启动
+ohMyAss Noto v0.5.11.py   入口：单实例检查、主窗口启动
 app_info.py              版本号与资源路径
 config_store.py          配置、错误日志、路径工具
 download_utils.py        下载与发布页解析
@@ -163,6 +163,19 @@ app_ui → 入口
 python -m unittest discover -s tests -v
 ```
 
+### 打包（Windows）
+
+```powershell
+python -m PyInstaller --noconfirm --clean --onefile --windowed `
+  --name "ohMyAss Noto v0.5.11" `
+  --icon "ohMyAss Noto.ico" --version-file version_info.txt `
+  --add-data "ohMyAss Noto.ico;." --add-data "ohMyAss Noto.png;." `
+  --add-data "bin\*;." --collect-all tkinterdnd2 --collect-data zhconv `
+  "ohMyAss Noto v0.5.11.py"
+```
+
+> `--collect-data zhconv` 必须保留：zhconv 的 `zhcdict.json` 不随模块自动打包，缺失时生成文本字幕会报 `FileNotFoundError`。
+
 ## 本地数据位置
 
 | 内容 | 路径 |
@@ -210,6 +223,12 @@ python -m unittest discover -s tests -v
 ---
 
 ## 更新日志
+
+### v0.5.11
+
+- 修复打包遗漏 zhconv/zhcdict.json 导致生成文本字幕时报 FileNotFoundError 的问题
+- 打包时显式收集 zhconv 词典数据（--collect-data zhconv）
+- v0.5.10 受该问题影响，建议升级到本版本
 
 ### v0.5.10
 
