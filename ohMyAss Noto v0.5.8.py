@@ -134,7 +134,7 @@ MIN_EVENT_DURATION_MS = 500
 MIN_EVENT_GAP_MS = 200
 
 APP_NAME = 'ohMyAss Noto'
-APP_VERSION = 'v0.5.7'
+APP_VERSION = 'v0.5.8'
 
 # WinUI 主题令牌（浅色 / 深色）
 LIGHT_PALETTE = {
@@ -5137,6 +5137,53 @@ def download_app_update(url: str, log=None, timeout: int = 900):
     return destination
 
 
+def build_app_update_script() -> str:
+    """生成更新批处理内容（纯 ASCII，路径全部通过环境变量传入）。"""
+    lines = [
+        '@echo off',
+        'setlocal EnableExtensions',
+        'echo [%date% %time%] update start>>"%LOG%"',
+        'echo pid %PID%>>"%LOG%"',
+        'echo target "%TARGET%">>"%LOG%"',
+        'echo source "%SOURCE%">>"%LOG%"',
+        'if not exist "%SOURCE%" goto missing',
+        'set /a tries=0',
+        ':wait',
+        'tasklist /FI "PID eq %PID%" 2>nul | find "%PID%" >nul',
+        'if errorlevel 1 goto copy',
+        'ping -n 2 127.0.0.1 >nul',
+        'set /a tries+=1',
+        'if %tries% GEQ 60 goto copy',
+        'goto wait',
+        ':copy',
+        'attrib -R "%TARGET%" >nul 2>&1',
+        'set /a copies=0',
+        ':copytry',
+        'copy /Y "%SOURCE%" "%TARGET%" >nul 2>&1',
+        'if not errorlevel 1 goto copied',
+        'ping -n 2 127.0.0.1 >nul',
+        'set /a copies+=1',
+        'if %copies% GEQ 90 goto failed',
+        'goto copytry',
+        ':copied',
+        'echo [%date% %time%] copied>>"%LOG%"',
+        'cd /d "%TARGETDIR%"',
+        'start "" "%TARGET%"',
+        'if errorlevel 1 echo start failed>>"%LOG%"',
+        'echo [%date% %time%] started>>"%LOG%"',
+        'rd /s /q "%SOURCEDIR%" >nul 2>&1',
+        'goto done',
+        ':missing',
+        'echo [%date% %time%] source missing>>"%LOG%"',
+        'goto done',
+        ':failed',
+        'echo [%date% %time%] copy failed>>"%LOG%"',
+        ':done',
+        'del /f /q "%~f0" >nul 2>&1',
+    ]
+    return '\r\n'.join(lines) + '\r\n'
+
+
 def apply_app_update(new_exe: str):
     """用批处理等待当前进程退出后替换 EXE 并重启。"""
     if not getattr(sys, 'frozen', False):
@@ -5148,32 +5195,36 @@ def apply_app_update(new_exe: str):
             return False, '程序目录没有写入权限，请手动下载替换'
     except OSError:
         return False, '无法访问程序目录'
-    script = os.path.join(tempfile.gettempdir(), 'oma_update.bat')
-    content = (
-        '@echo off\r\n'
-        'setlocal\r\n'
-        f'set "PID={os.getpid()}"\r\n'
-        f'set "TARGET={current}"\r\n'
-        f'set "SOURCE={new_exe}"\r\n'
-        'set /a tries=0\r\n'
-        ':wait\r\n'
-        'tasklist /FI "PID eq %PID%" 2>nul | find "%PID%" >nul\r\n'
-        'if errorlevel 1 goto replace\r\n'
-        'ping -n 2 127.0.0.1 >nul\r\n'
-        'set /a tries+=1\r\n'
-        'if %tries% GEQ 90 goto replace\r\n'
-        'goto wait\r\n'
-        ':replace\r\n'
-        'copy /Y "%SOURCE%" "%TARGET%" >nul\r\n'
-        'if not errorlevel 1 start "" "%TARGET%"\r\n'
-        'del "%~f0"\r\n'
-    )
+    if not os.path.isfile(new_exe):
+        return False, '更新文件不存在，请重新下载'
     try:
-        with open(script, 'w', encoding='mbcs', errors='replace') as handle:
-            handle.write(content)
-        flags = (getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-                 | getattr(subprocess, 'DETACHED_PROCESS', 0))
-        subprocess.Popen(['cmd', '/c', script], creationflags=flags, close_fds=True)
+        if os.path.getsize(new_exe) < 1024 * 1024:
+            return False, '更新文件不完整，请重新下载'
+    except OSError:
+        return False, '无法读取更新文件'
+    log_path = os.path.join(folder, 'ohMyAssNoto_update.log')
+    script = os.path.join(tempfile.gettempdir(), f'oma_update_{os.getpid()}.bat')
+    content = build_app_update_script()
+    env = dict(os.environ)
+    env.update({
+        'PID': str(os.getpid()),
+        'TARGET': current,
+        'TARGETDIR': folder,
+        'SOURCE': new_exe,
+        'SOURCEDIR': os.path.dirname(new_exe),
+        'LOG': log_path,
+    })
+    try:
+        with open(script, 'wb') as handle:
+            handle.write(content.encode('ascii'))
+        flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+        # 路径通过环境变量传递，脚本内容保持纯 ASCII；
+        # 双引号包裹可兼容带空格的临时目录。
+        subprocess.Popen(
+            f'cmd /c ""{script}""', env=env, creationflags=flags, close_fds=True,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     except OSError as exc:
         return False, str(exc)
     return True, ''

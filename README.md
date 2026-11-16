@@ -4,7 +4,7 @@
 
 ![ohMyAss Noto](ohMyAss%20Noto.png)
 
-> 当前版本：**v0.5.7** ｜ 平台：Windows 10 / 11（x64）
+> 当前版本：**v0.5.8** ｜ 平台：Windows 10 / 11（x64）
 
 ---
 
@@ -58,7 +58,7 @@
 pip install pillow zhconv tkinterdnd2
 
 # 注意文件名带空格，必须加引号
-python "ohMyAss Noto v0.5.7.py"
+python "ohMyAss Noto v0.5.8.py"
 ```
 
 ---
@@ -112,7 +112,7 @@ HDR 模式额外产出 SDR 对照版本（如 `2-简英双语-SDR-zh.ass`），�
 ## 目录结构
 
 ```
-ohMyAss Noto v0.5.7.py   主程序（单文件）
+ohMyAss Noto v0.5.8.py   主程序（单文件）
 ohMyAss Noto.ico         应用图标
 ohMyAss Noto.png         展示图
 version_info.txt         PyInstaller 版本资源
@@ -169,6 +169,14 @@ bin/                     图形字幕运行时依赖
 ---
 
 ## 更新日志
+
+### v0.5.8
+
+- 修复自动更新点击重启后没有反应：更新批处理不再写入错误的换行（此前每行变成 CR CR LF，导致路径变量带上多余字符，复制失败）
+- 更新批处理改为二进制写入，路径优先使用 8.3 短路径，避免中文和空格路径受代码页影响
+- 更新流程增加替换重试、写入权限检查与 `ohMyAssNoto_update.log` 日志，成功复制后再启动新版本
+- 更新完成后自动清理下载的临时文件
+- 图形字幕：ASS 文本按文件缓存、队列进度合并重绘、渐变颜色与表头重绘优化
 
 ### v0.5.7
 
