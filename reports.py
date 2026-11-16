@@ -200,7 +200,7 @@ del {
 def parse_issue_entries(data: dict) -> dict:
     """把问题数据 JSON 的 notices 转成 {行号: {need, problems}}。
 
-    级别统一为「请处理 / 请确认」，并兼容旧版「请验证 / 请查验」。
+    级别只接受当前的「请处理 / 请确认」。
     """
     entries = {}
     if not isinstance(data, dict):
@@ -209,12 +209,13 @@ def parse_issue_entries(data: dict) -> dict:
         if not isinstance(notice, dict):
             continue
         need = str(notice.get('need', ''))
-        if ('请处理' not in need and '请确认' not in need
-                and '请查验' not in need and '请验证' not in need):
+        if '请处理' not in need and '请确认' not in need:
             continue
         try:
             index = int(notice.get('index'))
         except (TypeError, ValueError):
+            continue
+        if index <= 0:
             continue
         item = entries.setdefault(index, {
             'need': '请处理' if '请处理' in need else '请确认',
@@ -268,8 +269,7 @@ def build_notices_html(filename: str, title: str, notices: list, source_label: s
         if len(parts) < 3:
             continue
         line_no, problem, need = parts[0], parts[1], parts[2]
-        if '请查验' in need or '请验证' in need:
-            need = need.replace('请查验', '请确认').replace('请验证', '请确认')
+        line_label = '全文' if line_no.strip() in ('0', '') else line_no
         type_counts[problem] += 1
         if '请确认' in need:
             verify_count += 1
@@ -282,7 +282,7 @@ def build_notices_html(filename: str, title: str, notices: list, source_label: s
             need_class = 'check'
         rows.append(
             f'<tr class="{need_class}">'
-            f'<td class="line">{html.escape(line_no)}</td>'
+            f'<td class="line">{html.escape(line_label)}</td>'
             f'<td>{html.escape(problem)}</td>'
             f'<td><span class="badge {need_class}">{html.escape(need)}</span></td>'
             '</tr>'

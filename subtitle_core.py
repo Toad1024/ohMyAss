@@ -91,6 +91,7 @@ EDIT_SOURCE_PREFIX = '字幕修改稿'
 
 # ASS 样式行字段位置
 STYLE_COLOUR_FIELDS = (3, 4, 5, 6)
+STYLE_FONT_SIZE_FIELD = 2
 STYLE_MARGIN_V_FIELD = 21
 
 # ssaHdrify（https://github.com/gky99/ssaHdrify）色彩映射参数
@@ -207,23 +208,6 @@ SDR_STYLES = [
     'Style: zh_note_double_line,思源黑体 Medium,66,&H00EAEAEA,&HF0000000,&H000D0500,&H00000000,0,0,0,0,100,100,0,0,1,2,0,8,0,0,14,1',
     'Style: Default,思源黑体 Medium,80,&H00EAEAEA,&HF0000000,&H000D0500,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,0,0,66,1',
 ]
-
-STYLE_KIND_ALIASES = {
-    'ZH_Bilingual': 'zh_dialogue_bilingual',
-    'ZH_Single': 'zh_dialogue_monolingual',
-    'EN_Bilingual': 'en_dialogue_bilingual',
-    'EN_Single': 'en_dialogue_monolingual',
-    'ZH_Annotation': 'zh_note_single_line',
-    'ZH_lyrics': 'zh_lyrics_bilingual',
-}
-LEGACY_STYLE_NAMES = {
-    'ZH_Bilingual_SDR': 'zh_dialogue_bilingual',
-    'ZH_Single_SDR': 'zh_dialogue_monolingual',
-    'EN_Bilingual_SDR': 'en_dialogue_bilingual',
-    'EN_Single_SDR': 'en_dialogue_monolingual',
-    'ZH_Annotation_SDR': 'zh_note_single_line',
-    'ZH_lyrics_SDR': 'zh_lyrics_bilingual',
-}
 
 # 双语样式成对共用行间距：修改任一类别，另一类别同步
 FSVP_PAIRS = (
@@ -366,6 +350,10 @@ def default_style_line(kind: str) -> str:
     for line in SDR_STYLES:
         if line.startswith(prefix):
             return line
+    # 未知类别统一退回 Default，避免误用第一个样式
+    for line in SDR_STYLES:
+        if line.startswith('Style: Default,'):
+            return line
     return SDR_STYLES[0]
 
 def style_line_name(line: str) -> str:
@@ -383,12 +371,13 @@ def apply_updated_margin_v(line: str, kind: str, margin: int) -> str:
     default = default_style_line(kind)
     parts = line.split(',')
     base = default.split(',')
+    field = STYLE_MARGIN_V_FIELD
     if len(parts) != len(base):
         return line
-    if parts[21] == str(margin):
+    if parts[field] == str(margin):
         return line
-    if parts[:21] == base[:21] and parts[22:] == base[22:]:
-        parts[21] = str(margin)
+    if parts[:field] == base[:field] and parts[field + 1:] == base[field + 1:]:
+        parts[field] = str(margin)
         return ','.join(parts)
     return line
 
@@ -397,12 +386,13 @@ def apply_updated_fontsize(line: str, kind: str, size: int) -> str:
     default = default_style_line(kind)
     parts = line.split(',')
     base = default.split(',')
+    field = STYLE_FONT_SIZE_FIELD
     if len(parts) != len(base):
         return line
-    if parts[2] == str(size):
+    if parts[field] == str(size):
         return line
-    if parts[:2] == base[:2] and parts[3:] == base[3:]:
-        parts[2] = str(size)
+    if parts[:field] == base[:field] and parts[field + 1:] == base[field + 1:]:
+        parts[field] = str(size)
         return ','.join(parts)
     return line
 
@@ -494,6 +484,9 @@ class Aegisub():
         self.is_mid_black = is_mid_black
         self.hdr_brightness = HDR_SUB_BRIGHTNESS
         self.style_lines = None
+        self.source_style_lines = {}
+        self.effect_style_names = set()
+        self.extra_style_lines = {}
         if is_HDR:
             self.contents = {
                 '1-简英双语-HDR-zh': OUT_BILINGUAL,
@@ -710,12 +703,26 @@ def get_styles(sub: Aegisub, style_lines=None) -> list:
 
     return result
 
+def output_style_lines(sub: Aegisub, style_lines=None) -> list:
+    """输出用样式行：固定样式 + 特效字幕引用的原始样式。"""
+    base = list(style_lines) if style_lines else (
+        getattr(sub, 'style_lines', None) or SDR_STYLES)
+    result = list(base)
+    existing = {style_line_name(line).lower() for line in result}
+    for name, line in getattr(sub, 'extra_style_lines', {}).items():
+        if name in existing:
+            continue
+        result.append(line)
+        existing.add(name)
+    return result
+
+
 def build_sdr_bilingual_lines(sub: Aegisub, lines: list) -> list:
     """把 HDR 双语内容转成 SDR 版：换回 SDR 样式；SDR/HDR 样式名一致。"""
     original = sub.is_HDR
     sub.is_HDR = False
     try:
-        sdr_styles = get_styles(sub)
+        sdr_styles = get_styles(sub, output_style_lines(sub))
     finally:
         sub.is_HDR = original
     result = []
@@ -1271,12 +1278,12 @@ def check_glossary_consistency(sub, zh_segments: list, en_segments: list):
             sub.add_notice(notice)
 
 def fill_dialogue(sub: Aegisub, contents: dict, line: str):
-    sub.notice_index += 1
     data = line.split(',', 9)
     if len(data) < 10:
         for key in contents:
             contents[key].append(line)
         return
+    sub.notice_index += 1
 
     start_ms = parse_ass_time(data[1])
     end_ms = parse_ass_time(data[2])
@@ -1314,7 +1321,12 @@ def fill_dialogue(sub: Aegisub, contents: dict, line: str):
         text = get_special_effect(sub, text)
         text = match_blur3_tag.sub('', text)
         text = match_empty_tag.sub('', text)
-        special_style = get_style_name(sub, 'Default')
+        # 特效字幕保留原样式：把源样式复制进输出样式表
+        original_style = data[3].strip() or 'Default'
+        source_style = sub.source_style_lines.get(original_style.lower())
+        if source_style:
+            sub.extra_style_lines[original_style.lower()] = source_style
+        special_style = original_style
         result_chs = build_dialogue(
             data, special_style, convert_outside_tags(text, 'zh-hans'), zero_margin=False)
         result_cht = build_dialogue(
@@ -1684,10 +1696,6 @@ def process_file(filename: str, is_HDR: bool, is_mid_black: bool, meta: dict = N
             if not (isinstance(line, str) and line.startswith('Style: ')
                     and line.count(',') >= 21):
                 continue
-            name = style_line_name(line)
-            legacy_kind = LEGACY_STYLE_NAMES.get(name)
-            if legacy_kind:
-                line = rename_style_line(line, legacy_kind)
             cleaned.append(line)
         if cleaned:
             unique_styles = {}
@@ -1708,9 +1716,7 @@ def process_file(filename: str, is_HDR: bool, is_mid_black: bool, meta: dict = N
     try:
         sub.fsvp_en = float(fsvp_values.get(
             'en_dialogue_bilingual',
-            fsvp_values.get(
-                'zh_dialogue_bilingual',
-                fsvp_values.get('EN_Bilingual', 12.0))))
+            fsvp_values.get('zh_dialogue_bilingual', 12.0)))
     except (TypeError, ValueError, AttributeError):
         sub.fsvp_en = 12.0
     try:
@@ -1718,17 +1724,13 @@ def process_file(filename: str, is_HDR: bool, is_mid_black: bool, meta: dict = N
             'en_lyrics_bilingual',
             fsvp_values.get(
                 'zh_lyrics_bilingual',
-                fsvp_values.get(
-                    'en_dialogue_bilingual',
-                    fsvp_values.get('EN_Bilingual', 12.0)))))
+                fsvp_values.get('en_dialogue_bilingual', 12.0))))
     except (TypeError, ValueError, AttributeError):
         sub.fsvp_en_lyrics = 12.0
     try:
         sub.fsvp_note_double = float(fsvp_values.get(
             'zh_note_double_line',
-            fsvp_values.get(
-                'zh_note_single_line',
-                fsvp_values.get('ZH_Annotation', 12.0))))
+            fsvp_values.get('zh_note_single_line', 12.0)))
     except (TypeError, ValueError, AttributeError):
         sub.fsvp_note_double = 12.0
     sub.read_file()
@@ -1788,6 +1790,26 @@ def process_file(filename: str, is_HDR: bool, is_mid_black: bool, meta: dict = N
     script_info_written = False
     styles_written = False
 
+    # 先收集源样式与特效字幕使用的样式，保证写入样式表时就能包含它们
+    for raw in sub.raw_contents:
+        stripped = raw.strip()
+        if stripped.lower().startswith('style:'):
+            style_parts = stripped.split(',')
+            if len(style_parts) > 18:
+                style_name = style_parts[0].split(':', 1)[1].strip()
+                if style_name:
+                    sub.source_style_lines[style_name.lower()] = stripped
+        elif stripped.lower().startswith('dialogue:'):
+            parts = stripped.split(',', 9)
+            if len(parts) >= 10 and has_special_effect(parts[9]):
+                style_name = parts[3].strip()
+                if style_name:
+                    sub.effect_style_names.add(style_name.lower())
+    for style_name in sub.effect_style_names:
+        source_line = sub.source_style_lines.get(style_name)
+        if source_line:
+            sub.extra_style_lines[style_name] = source_line
+
     for line in sub.raw_contents:
         if match_paragraph_script_info.search(line):
             mode = Section.SCRIPT_INFO
@@ -1799,7 +1821,7 @@ def process_file(filename: str, is_HDR: bool, is_mid_black: bool, meta: dict = N
             fill_line(contents, line)
         elif match_paragraph_events.search(line):
             if mode == Section.STYLES and not styles_written:
-                for style_line in get_styles(sub):
+                for style_line in get_styles(sub, output_style_lines(sub)):
                     fill_line(contents, f'{style_line}\n')
                 styles_written = True
             mode = Section.EVENTS
@@ -1827,7 +1849,7 @@ def process_file(filename: str, is_HDR: bool, is_mid_black: bool, meta: dict = N
                     continue
                 if line == '\n':
                     if not styles_written:
-                        for style_line in get_styles(sub):
+                        for style_line in get_styles(sub, output_style_lines(sub)):
                             fill_line(contents, f'{style_line}\n')
                         styles_written = True
                     fill_line(contents, line)
@@ -1867,7 +1889,7 @@ def process_file(filename: str, is_HDR: bool, is_mid_black: bool, meta: dict = N
                 build_taiwan_compare_html(title, filename, taiwan_changes, taiwan_error),
             )
             if taiwan_error:
-                sub.add_notice('繁化姬台湾化失败,请处理')
+                sub.add_notice('繁化姬台湾化失败,请处理', index=0)
         elif os.path.exists(report_path):
             try:
                 os.remove(report_path)
@@ -1893,17 +1915,25 @@ def process_file(filename: str, is_HDR: bool, is_mid_black: bool, meta: dict = N
                 for line in contents[key]
             ]
 
+    renamed_outputs = []
     for key, value in sub.contents.items():
         if sub.source_is_chinese_only and value in (OUT_BILINGUAL, OUT_ENG):
             continue
         file = os.path.join(output_dir, f'{key}.ass')
-        with open(file, 'w', encoding='utf-8-sig') as f:
-            f.writelines(contents[f'{value}'])
+        saved = write_text_with_fallback(file, ''.join(contents[f'{value}']))
+        if os.path.basename(saved) != os.path.basename(file):
+            renamed_outputs.append((os.path.basename(file), os.path.basename(saved)))
 
     if sdr_content is not None:
         file = os.path.join(output_dir, sdr_name)
-        with open(file, 'w', encoding='utf-8-sig') as f:
-            f.writelines(build_sdr_bilingual_lines(sub, sdr_content))
+        saved = write_text_with_fallback(
+            file, ''.join(build_sdr_bilingual_lines(sub, sdr_content)))
+        if os.path.basename(saved) != os.path.basename(file):
+            renamed_outputs.append((os.path.basename(file), os.path.basename(saved)))
+
+    for expected, saved in renamed_outputs:
+        sub.add_notice(
+            f'输出文件被占用，{expected} 已另存为 {saved},请检查', index=0)
 
     sub.check_timeline_overlaps()
     sub.check_timeline_gaps()
@@ -1950,8 +1980,9 @@ def process_file(filename: str, is_HDR: bool, is_mid_black: bool, meta: dict = N
                 },
                 'notices': notices_data,
             }, handle, ensure_ascii=False, indent=2)
-    except OSError:
-        pass
+    except OSError as exc:
+        # 数据文件写不进去时报告页仍可用，但问题修复页无法自动载入
+        log_exception('写入问题数据', exc)
     return html_file, output_dir, sub.source_is_chinese_only
 
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')

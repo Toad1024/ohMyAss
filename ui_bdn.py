@@ -942,6 +942,8 @@ class BdnSupPanel(ttk.Frame):
         job_out = job['out_dir']
 
         def worker():
+            info = {}
+            issues = []
             try:
                 ok, message, outputs = generate_bdn_sup(
                     job_path, job_out,
@@ -956,6 +958,13 @@ class BdnSupPanel(ttk.Frame):
                     progress=lambda value: self.queue.put(('progress', value)),
                     cancel_event=self.cancel_event,
                 )
+                if ok:
+                    try:
+                        info, issues = validate_bdn_sup(
+                            job_path, job_out, make_sup, make_pes)
+                    except Exception as exc:
+                        log_exception('校验 BDN/SUP', exc)
+                        info, issues = {}, [f'校验失败：{exc}']
             except RenderCancelled:
                 self._cleanup_cancelled(job_out, job_path)
                 self.queue.put(('cancelled',))
@@ -963,19 +972,18 @@ class BdnSupPanel(ttk.Frame):
             except Exception as exc:
                 log_exception('生成 BDN/SUP', exc)
                 ok, message, outputs = False, str(exc), []
-            self.queue.put(('done', ok, message, outputs))
+            self.queue.put(('done', ok, message, outputs, info, issues))
 
         threading.Thread(target=worker, daemon=True).start()
         self.after(100, self._poll)
 
-    def _sup_job_finished(self, ok, message, outputs):
+    def _sup_job_finished(self, ok, message, outputs, info=None, issues=None):
         job = self.current_sup_job
         if ok:
             self.sup_batch_success += 1
             if job is not None:
-                job['validation_info'], job['validation_issues'] = validate_bdn_sup(
-                    job['path'], job['out_dir'], job.get('make_sup', True),
-                    job.get('make_pes', False))
+                job['validation_info'] = info or {}
+                job['validation_issues'] = issues or []
                 self._set_ass_queue_status(self.sup_job_index, '完成')
                 self._set_ass_queue_progress(self.sup_job_index, 100)
             if not self.sup_batch:
@@ -1080,7 +1088,7 @@ class BdnSupPanel(ttk.Frame):
                     self._sup_cancelled()
                     return
                 elif kind == 'done':
-                    self._sup_job_finished(item[1], item[2], item[3])
+                    self._sup_job_finished(item[1], item[2], item[3], item[4], item[5])
                     return
         except queue.Empty:
             pass

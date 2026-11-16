@@ -42,6 +42,7 @@ LIGHT_PALETTE = {
     'UI_TOOLTIP_FG': '#243b53',
     'UI_SUCCESS': '#15803d',
     'UI_WARNING': '#b45309',
+    'UI_CONFIRM': '#ca8a04',
     'UI_DANGER': '#b91c1c',
     'UI_PREVIEW_BG': '#d6dbe3',
 }
@@ -65,6 +66,7 @@ DARK_PALETTE = {
     'UI_TOOLTIP_FG': '#e7ecf3',
     'UI_SUCCESS': '#4ade80',
     'UI_WARNING': '#fbbf24',
+    'UI_CONFIRM': '#fde047',
     'UI_DANGER': '#f87171',
     'UI_PREVIEW_BG': '#d6dbe3',
 }
@@ -88,6 +90,7 @@ UI_TOOLTIP_BG = LIGHT_PALETTE['UI_TOOLTIP_BG']
 UI_TOOLTIP_FG = LIGHT_PALETTE['UI_TOOLTIP_FG']
 UI_SUCCESS = LIGHT_PALETTE['UI_SUCCESS']
 UI_WARNING = LIGHT_PALETTE['UI_WARNING']
+UI_CONFIRM = LIGHT_PALETTE['UI_CONFIRM']
 UI_DANGER = LIGHT_PALETTE['UI_DANGER']
 UI_PREVIEW_BG = LIGHT_PALETTE['UI_PREVIEW_BG']
 
@@ -193,7 +196,8 @@ def theme_fg_map(old_dark: bool, new_dark: bool) -> dict:
     old_palette = DARK_PALETTE if old_dark else LIGHT_PALETTE
     new_palette = DARK_PALETTE if new_dark else LIGHT_PALETTE
     keys = ('UI_TEXT', 'UI_MUTED', 'UI_ACCENT', 'UI_ACCENT_DARK',
-            'UI_TOOLTIP_FG', 'UI_SUCCESS', 'UI_WARNING', 'UI_DANGER')
+            'UI_TOOLTIP_FG', 'UI_SUCCESS', 'UI_WARNING', 'UI_CONFIRM',
+            'UI_DANGER')
     mapping = {}
     for key in keys:
         old_value = old_palette[key]
@@ -222,7 +226,7 @@ def recolor_widget_tree(widget, bg_map: dict, fg_map: dict):
     if isinstance(widget, ttk.Treeview):
         try:
             widget.tag_configure('process', foreground=UI_DANGER)
-            widget.tag_configure('verify', foreground=UI_WARNING)
+            widget.tag_configure('verify', foreground=UI_CONFIRM)
         except tk.TclError:
             pass
     try:

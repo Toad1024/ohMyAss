@@ -5,13 +5,16 @@ import os
 import sys
 import re
 import json
+import shutil
 import subprocess
 import tempfile
 import urllib.request
 import urllib.parse
 
-from config_store import log_exception
-from download_utils import TOOLS_USER_AGENT, html_latest_tag, tools_request, download_file
+from download_utils import (
+    TOOLS_USER_AGENT, download_file, html_latest_tag, tools_request,
+    verify_file_digest,
+)
 
 
 APP_UPDATE_REPO = 'cmct/ohMyAss'
@@ -36,7 +39,7 @@ def _app_assets_from_page(repo: str, tag: str):
 
 
 def fetch_app_update():
-    """返回 (最新版本号, 下载地址, 资源文件名)。"""
+    """返回 (最新版本号, 下载地址, 资源文件名, SHA-256 校验值)。"""
     repo = APP_UPDATE_REPO
     tag = ''
     assets = []
@@ -51,32 +54,58 @@ def fetch_app_update():
         for asset in data.get('assets') or []:
             name = str(asset.get('name') or '')
             url = str(asset.get('browser_download_url') or '')
+            digest = str(asset.get('digest') or '')
             lower = name.lower()
             if lower.endswith('.exe') and 'ohmyass' in lower and url:
-                assets.append((name, url))
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        # 接口不可用时退回发布页解析，仍失败则用固定下载地址
+                assets.append((name, url, digest))
+    except (OSError, ValueError, KeyError, TypeError):
+        # 接口不可用时退回发布页解析属于正常降级，不写错误日志
         tag = ''
-        log_exception('检查软件更新', exc)
     if not tag:
         tag = html_latest_tag(repo)
     if not assets:
-        assets = _app_assets_from_page(repo, tag)
+        assets = [(name, url, '') for name, url in _app_assets_from_page(repo, tag)]
     if not assets:
         name = APP_UPDATE_ASSET
         url = (f'https://github.com/{repo}/releases/latest/download/'
                f'{urllib.parse.quote(name)}')
-        assets = [(name, url)]
-    for name, url in assets:
+        assets = [(name, url, '')]
+    for name, url, digest in assets:
         if name.lower() == APP_UPDATE_ASSET.lower():
-            return tag, url, name
-    return tag, assets[0][1], assets[0][0]
+            return tag, url, name, digest
+    name, url, digest = assets[0]
+    return tag, url, name, digest
 
 
-def download_app_update(url: str, log=None, timeout: int = 900):
+def discard_app_update(path: str):
+    """删除下载的更新文件及其临时目录（仅限 oma_update_ 前缀）。"""
+    folder = os.path.dirname(os.path.abspath(path))
+    if os.path.basename(folder).startswith('oma_update_'):
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def fetch_sidecar_digest(url: str) -> str:
+    """API 不可用时尝试读取发布附件旁的 .sha256 校验文件。"""
+    try:
+        with tools_request(url + '.sha256', timeout=30) as response:
+            text = response.read().decode('utf-8', 'replace')
+    except (OSError, ValueError):
+        return ''
+    match = re.search(r'\b([0-9a-fA-F]{64})\b', text)
+    return 'sha256:' + match.group(1).lower() if match else ''
+
+
+def download_app_update(url: str, log=None, timeout: int = 900, digest: str = ''):
     folder = tempfile.mkdtemp(prefix='oma_update_')
     destination = os.path.join(folder, APP_UPDATE_ASSET)
-    download_file(url, destination, log=log, timeout=timeout)
+    try:
+        download_file(url, destination, log=log, timeout=timeout)
+        expected = digest or fetch_sidecar_digest(url)
+        if expected and not verify_file_digest(destination, expected):
+            raise RuntimeError('更新文件校验失败，请重新下载')
+    except Exception:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
     return destination
 
 
@@ -155,17 +184,30 @@ def build_app_update_script() -> str:
     return '\r\n'.join(lines) + '\r\n'
 
 
+def folder_writable(folder: str) -> bool:
+    """真正尝试写一个临时文件，比 os.access 可靠。"""
+    probe = os.path.join(folder, f'.oma_write_{os.getpid()}.tmp')
+    try:
+        with open(probe, 'wb') as handle:
+            handle.write(b'1')
+        os.remove(probe)
+        return True
+    except OSError:
+        try:
+            os.remove(probe)
+        except OSError:
+            pass
+        return False
+
+
 def apply_app_update(new_exe: str):
     """用批处理等待当前进程退出后替换 EXE 并重启。"""
     if not getattr(sys, 'frozen', False):
         return False, '源码运行模式无法自动替换'
     current = os.path.abspath(sys.executable)
     folder = os.path.dirname(current)
-    try:
-        if not os.access(folder, os.W_OK):
-            return False, '程序目录没有写入权限，请手动下载替换'
-    except OSError:
-        return False, '无法访问程序目录'
+    if not folder_writable(folder):
+        return False, '程序目录没有写入权限，请手动下载替换'
     if not os.path.isfile(new_exe):
         return False, '更新文件不存在，请重新下载'
     try:

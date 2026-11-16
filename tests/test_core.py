@@ -3,8 +3,11 @@
 运行：python -m unittest discover -s tests -v
 """
 
+import hashlib
 import os
 import sys
+import tempfile
+import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -107,6 +110,10 @@ class StyleTests(unittest.TestCase):
             core.linked_fsvp_kinds('zh_note_double_line'),
             ('zh_note_double_line',))
 
+    def test_default_style_fallback_is_default(self):
+        line = core.default_style_line('not_a_real_kind')
+        self.assertTrue(line.startswith('Style: Default,'))
+
 
 class GlossaryTests(unittest.TestCase):
     def test_normalize_glossary(self):
@@ -172,10 +179,11 @@ class ReportTests(unittest.TestCase):
         data = {
             'notices': [
                 {'index': 3, 'need': '请处理', 'problem': '对白行数大于2'},
-                {'index': '4', 'need': '请验证', 'problem': '疑似英文缺失'},
-                {'index': 5, 'need': '请查验', 'problem': '译文缺失'},
-                {'index': 5, 'need': '请确认', 'problem': '中文对白行数大于1'},
+                {'index': '4', 'need': '请确认', 'problem': '疑似英文缺失'},
+                {'index': 5, 'need': '请确认', 'problem': '译文缺失'},
+                {'index': 5, 'need': '请处理', 'problem': '中文对白行数大于1'},
                 {'index': 'bad', 'need': '请处理', 'problem': 'x'},
+                {'index': 0, 'need': '请处理', 'problem': 'x'},
                 {'index': 6, 'need': '请检查', 'problem': 'x'},
             ]
         }
@@ -183,7 +191,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(set(entries), {3, 4, 5})
         self.assertEqual(entries[3]['need'], '请处理')
         self.assertEqual(entries[4]['need'], '请确认')
-        self.assertEqual(entries[5]['need'], '请确认')
+        self.assertEqual(entries[5]['need'], '请处理')
         self.assertEqual(entries[5]['problems'],
                          ['译文缺失', '中文对白行数大于1'])
         self.assertEqual(reports.parse_issue_entries([]), {})
@@ -192,14 +200,13 @@ class ReportTests(unittest.TestCase):
         page = reports.build_notices_html(
             'demo.ass', '片名', [
                 '3,对白行数大于2,请处理',
-                '5,疑似英文缺失,请验证',
-                '6,译文缺失,请查验',
+                '5,疑似英文缺失,请确认',
+                '6,译文缺失,请检查',
             ])
         self.assertIn('对白行数大于2', page)
         self.assertIn('请处理', page)
         self.assertIn('请确认', page)
-        self.assertNotIn('请验证', page)
-        self.assertNotIn('请查验', page)
+        self.assertIn('请检查', page)
         self.assertIn('问题总数<b>3</b>', page)
 
     def test_build_notices_html_escapes(self):
@@ -207,6 +214,88 @@ class ReportTests(unittest.TestCase):
             'x.ass', '<b>片名</b>', ['1,<script>,请处理'])
         self.assertIn('&lt;b&gt;片名&lt;/b&gt;', page)
         self.assertIn('&lt;script&gt;', page)
+
+    def test_global_notice_shows_full_text(self):
+        page = reports.build_notices_html(
+            'x.ass', '片名', ['0,繁化姬台湾化失败,请处理'])
+        self.assertIn('全文', page)
+        self.assertIn('繁化姬台湾化失败', page)
+
+
+class EffectStyleTests(unittest.TestCase):
+    def test_effect_keeps_source_style(self):
+        content = (
+            '[Script Info]\n'
+            'Title: t\n'
+            'ScriptType: v4.00+\n'
+            'PlayResX: 1920\n'
+            'PlayResY: 1080\n'
+            '[V4+ Styles]\n'
+            'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, '
+            'OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, '
+            'ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, '
+            'Alignment, MarginL, MarginR, MarginV, Encoding\n'
+            'Style: Default,微软雅黑,80,&H00EAEAEA,&HF0000000,&H000D0500,&H00000000,'
+            '0,0,0,0,100,100,0,0,1,2,0,2,0,0,66,1\n'
+            'Style: FxStyle,微软雅黑,80,&H00EAEAEA,&HF0000000,&H000D0500,&H00000000,'
+            '0,0,0,0,100,100,0,0,1,2,0,2,0,0,30,1\n'
+            '[Events]\n'
+            'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n'
+            'Dialogue: 0,0:00:01.00,0:00:02.00,FxStyle,,0,0,0,,{\\pos(960,540)}特效文字\n'
+            'Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,普通中文\n'
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            source = os.path.join(folder, 'effect.ass')
+            with open(source, 'w', encoding='utf-8-sig') as handle:
+                handle.write(content)
+            meta = {
+                'title': '特效测试',
+                'script_updated_by': 'tester',
+                'taiwan': False,
+                'output_root': folder,
+                'style_fsvp': {},
+                'glossary': [],
+                'hdr_brightness': 100,
+            }
+            _, out_dir, _ = core.process_file(source, False, False, meta)
+            text = ''
+            for name in os.listdir(out_dir):
+                if name.endswith('.ass') and '简体中文' in name:
+                    with open(os.path.join(out_dir, name), 'r', encoding='utf-8-sig') as handle:
+                        text = handle.read()
+                    break
+            self.assertIn('Style: FxStyle,', text)
+            self.assertIn('Dialogue: 0,0:00:01.00,0:00:02.00,FxStyle,', text)
+            self.assertNotIn('Dialogue: 0,0:00:01.00,0:00:02.00,Default,', text)
+
+
+class FontTests(unittest.TestCase):
+    def test_ass_font_names_includes_inline_overrides(self):
+        import bdn_sup
+
+        content = (
+            '[Script Info]\n'
+            'ScriptType: v4.00+\n'
+            '[V4+ Styles]\n'
+            'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, '
+            'OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, '
+            'ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, '
+            'Alignment, MarginL, MarginR, MarginV, Encoding\n'
+            'Style: Default,样式字体,80,&H00EAEAEA,&HF0000000,&H000D0500,&H00000000,'
+            '0,0,0,0,100,100,0,0,1,2,0,2,0,0,14,1\n'
+            '[Events]\n'
+            'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n'
+            'Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{\\fn行内字体}第一句\n'
+            'Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\\fn@竖排字体}第二句\n'
+            'Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,{\\fn}重置后仍是样式字体\n'
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, 'fonts.ass')
+            with open(path, 'w', encoding='utf-8-sig') as handle:
+                handle.write(content)
+            self.assertEqual(
+                bdn_sup.ass_font_names(path),
+                ['样式字体', '行内字体', '竖排字体'])
 
 
 class UpdateScriptTests(unittest.TestCase):
@@ -239,11 +328,30 @@ class UpdateScriptTests(unittest.TestCase):
         self.assertIn('set "_PYI_APPLICATION_HOME_DIR="',
                       app_update.build_app_update_script())
 
+    def test_verify_file_digest(self):
+        import app_update
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, 'a.bin')
+            with open(path, 'wb') as handle:
+                handle.write(b'ohMyAss update payload')
+            digest = hashlib.sha256(b'ohMyAss update payload').hexdigest()
+            self.assertTrue(app_update.verify_file_digest(path, 'sha256:' + digest))
+            self.assertTrue(app_update.verify_file_digest(path, digest))
+            self.assertTrue(app_update.verify_file_digest(path, ''))
+            self.assertFalse(app_update.verify_file_digest(path, 'sha256:' + '0' * 64))
+
+    def test_folder_writable(self):
+        import app_update
+
+        with tempfile.TemporaryDirectory() as folder:
+            self.assertTrue(app_update.folder_writable(folder))
+            self.assertFalse(
+                app_update.folder_writable(os.path.join(folder, 'missing')))
+
 
 class ConfigTests(unittest.TestCase):
     def test_config_roundtrip_and_error_log(self):
-        import tempfile
-
         with tempfile.TemporaryDirectory() as folder:
             old_config = config_store.CONFIG_PATH
             old_log = config_store.ERROR_LOG_PATH
@@ -266,6 +374,22 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config_store.sanitize_folder_name('name. '), 'name')
         self.assertEqual(config_store.sanitize_folder_name('CON'), 'CON_')
         self.assertEqual(config_store.sanitize_folder_name(''), '')
+
+    def test_cleanup_stale_temp_folders(self):
+        with tempfile.TemporaryDirectory() as folder:
+            old = os.path.join(folder, '_MEI111')
+            fresh = os.path.join(folder, '_MEI222')
+            other = os.path.join(folder, 'other_dir')
+            os.makedirs(old)
+            os.makedirs(fresh)
+            os.makedirs(other)
+            old_time = time.time() - 2 * 86400
+            os.utime(old, (old_time, old_time))
+            config_store.cleanup_stale_temp_folders(
+                base=folder, max_age_seconds=86400)
+            self.assertFalse(os.path.exists(old))
+            self.assertTrue(os.path.exists(fresh))
+            self.assertTrue(os.path.exists(other))
 
 
 class VersionTests(unittest.TestCase):

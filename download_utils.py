@@ -1,6 +1,7 @@
 """网络请求与文件下载工具。"""
 
 
+import hashlib
 import re
 import urllib.request
 import urllib.parse
@@ -31,6 +32,28 @@ def download_file(url: str, dest: str, log=None, timeout: int = 120):
                     shown = percent
                     log(f'下载中 {percent}%')
     return dest
+
+
+def file_sha256(path: str) -> str:
+    """计算文件 SHA-256（小写十六进制）。"""
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_file_digest(path: str, digest: str) -> bool:
+    """按 GitHub 的 sha256:... 摘要校验文件；没有摘要时视为通过。"""
+    value = str(digest or '').strip().lower()
+    if not value:
+        return True
+    if value.startswith('sha256:'):
+        value = value.split(':', 1)[1]
+    try:
+        return file_sha256(path) == value
+    except OSError:
+        return False
 
 
 def html_latest_tag(repo: str) -> str:

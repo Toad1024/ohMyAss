@@ -3,11 +3,12 @@
 import ctypes
 import os
 import sys
+import threading
 import tkinter as tk
 from tkinter import messagebox
 
 from app_ui import App, create_root
-from config_store import log_exception
+from config_store import cleanup_stale_temp_folders, log_exception
 from theme_ui import UI_SCALE
 
 SINGLE_INSTANCE_HANDLE = None
@@ -42,6 +43,9 @@ if __name__ == '__main__':
     if not acquire_single_instance():
         messagebox.showinfo('ohMyAss Noto', '软件已经在运行，请使用已打开的窗口。')
         sys.exit(0)
+    # 仅冻结运行时清理临时解压目录，源码运行不碰其他程序的目录
+    if getattr(sys, 'frozen', False):
+        threading.Thread(target=cleanup_stale_temp_folders, daemon=True).start()
     root = create_root()
     try:
         root.tk.call('tk', 'scaling', UI_SCALE * 96.0 / 72.0)

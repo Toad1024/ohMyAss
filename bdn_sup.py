@@ -5,6 +5,7 @@ import os
 import re
 import json
 import math
+import mmap
 import shutil
 import subprocess
 import tempfile
@@ -16,7 +17,9 @@ import urllib.parse
 
 from app_info import resource_path
 from config_store import log_exception
-from download_utils import html_latest_tag, tools_request, download_file
+from download_utils import (
+    download_file, html_latest_tag, tools_request, verify_file_digest,
+)
 from fonts import font_name_installed, installed_font_records
 from subtitle_core import parse_ass_time
 
@@ -157,8 +160,18 @@ def load_bdn_tool_state(name: str) -> dict:
 def save_bdn_tool_state(name: str, data: dict):
     folder = bdn_tool_dir(name)
     os.makedirs(folder, exist_ok=True)
-    with open(os.path.join(folder, 'state.json'), 'w', encoding='utf-8') as handle:
-        json.dump(data, handle, ensure_ascii=False, indent=2)
+    path = os.path.join(folder, 'state.json')
+    temp_path = path + '.tmp'
+    try:
+        with open(temp_path, 'w', encoding='utf-8') as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+        os.replace(temp_path, path)
+    except OSError as exc:
+        log_exception(f'保存工具状态：{name}', exc)
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
 
 
 def bdn_tool_exe(name: str) -> str:
@@ -173,6 +186,23 @@ def bdn_tool_version_text() -> str:
         state = load_bdn_tool_state(name)
         parts.append(f'{BDN_TOOL_SPECS[name]["label"]} {state.get("tag") or "未安装"}')
     return ' · '.join(parts)
+
+
+def bdn_tool_installed(name: str) -> bool:
+    """工具状态文件存在且可执行文件确实存在。"""
+    state = load_bdn_tool_state(name)
+    return bool(state.get('exe')) and os.path.isfile(bdn_tool_exe(name))
+
+
+def bdn_tools_status_text() -> str:
+    """返回已安装 / 部分安装 / 未安装，用于设置页状态标签。"""
+    names = list(BDN_TOOL_SPECS)
+    count = sum(1 for name in names if bdn_tool_installed(name))
+    if count == len(names):
+        return '已安装'
+    if count == 0:
+        return '未安装'
+    return f'部分安装（{count}/{len(names)}）'
 
 
 def ensure_seven_zip(log=None) -> str:
@@ -207,13 +237,24 @@ def _load_release_cache(repo: str):
     try:
         with open(_release_cache_path(), 'r', encoding='utf-8') as handle:
             data = json.load(handle)
+        if not isinstance(data, dict):
+            return []
         items = data.get(repo)
         if not isinstance(items, list):
             return []
         candidates = []
-        for tag, name, url in items:
+        for item in items:
+            if not isinstance(item, (list, tuple)) or len(item) < 3:
+                continue
+            tag, name, url = item[0], item[1], item[2]
+            digest = item[3] if len(item) > 3 else ''
             if tag and name and url:
-                candidates.append((tag, {'name': name, 'browser_download_url': url, 'size': 0}))
+                candidates.append((tag, {
+                    'name': name,
+                    'browser_download_url': url,
+                    'digest': digest,
+                    'size': 0,
+                }))
         return candidates
     except FileNotFoundError:
         return []
@@ -230,7 +271,8 @@ def _save_release_cache(repo: str, candidates: list):
             with open(path, 'r', encoding='utf-8') as handle:
                 data = json.load(handle)
         data[repo] = [
-            [tag, asset.get('name', ''), asset.get('browser_download_url', '')]
+            [tag, asset.get('name', ''), asset.get('browser_download_url', ''),
+             asset.get('digest', '')]
             for tag, asset in candidates
         ]
         os.makedirs(BDN_TOOL_ROOT, exist_ok=True)
@@ -280,6 +322,7 @@ def _html_tag_candidates(repo: str, tag: str, spec: dict):
         candidates.append((tag, {
             'name': name,
             'browser_download_url': url,
+            'digest': '',
             'size': 0,
         }))
     return candidates
@@ -428,6 +471,9 @@ def install_bdn_tool(name: str, log=None, force: bool = False):
                 log(f'下载 {spec["label"]} {tag}{suffix}…')
             archive = os.path.join(work, 'tool.7z')
             download_file(asset['browser_download_url'], archive)
+            if not verify_file_digest(archive, asset.get('digest', '')):
+                errors.append(f'{tag}：文件校验失败')
+                continue
             extract_dir = os.path.join(work, 'extract')
             _extract_archive(seven, archive, extract_dir)
             exe_path = _find_file(extract_dir, spec['exe'])
@@ -595,8 +641,10 @@ def vsfilter_available() -> bool:
     return bool(vsfilter_render_dir())
 
 
-@lru_cache(maxsize=8)
-def _read_ass_text_cached(path: str, _mtime_ns: int, _size: int) -> str:
+ASS_CACHE_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _decode_ass_file(path: str) -> str:
     try:
         with open(path, 'rb') as handle:
             data = handle.read()
@@ -615,22 +663,30 @@ def _read_ass_text_cached(path: str, _mtime_ns: int, _size: int) -> str:
     return data.decode('cp1252', errors='replace')
 
 
+@lru_cache(maxsize=8)
+def _read_ass_text_cached(path: str, _mtime_ns: int, _size: int) -> str:
+    return _decode_ass_file(path)
+
+
 def read_ass_text(path: str) -> str:
-    """按 BOM / UTF-8 / GBK 依次读取 ASS 文本，按修改时间缓存。"""
+    """按 BOM / UTF-8 / GBK 依次读取 ASS 文本；大文件不进缓存。"""
     try:
         stat = os.stat(path)
     except OSError:
         return ''
+    if stat.st_size > ASS_CACHE_MAX_BYTES:
+        return _decode_ass_file(os.path.abspath(path))
     return _read_ass_text_cached(
         os.path.abspath(path), stat.st_mtime_ns, stat.st_size)
 
 
 def ass_font_names(path: str) -> list:
-    """提取 ASS 样式里引用的字体名（去重、保持出现顺序）。"""
+    """提取 ASS 引用的字体名（样式 + 行内 \\fn，去重并保持出现顺序）。"""
     names = []
     section = ''
     fields = None
-    for raw in read_ass_text(path).splitlines():
+    text = read_ass_text(path)
+    for raw in text.splitlines():
         line = raw.strip()
         if line.startswith('['):
             section = line.lower()
@@ -647,9 +703,21 @@ def ass_font_names(path: str) -> list:
         index = fields.index('fontname')
         if index >= len(values):
             continue
-        name = values[index].strip()
+        name = values[index].strip().lstrip('@')
         if name and name not in names:
             names.append(name)
+    # 行内 \fn 覆盖使用的字体同样需要检查
+    inline_pattern = re.compile(r'\\fn([^\\}]*)', re.I)
+    for raw in text.splitlines():
+        if not raw.lower().lstrip().startswith('dialogue:'):
+            continue
+        parts = raw.split(',', 9)
+        if len(parts) < 10:
+            continue
+        for match in inline_pattern.finditer(parts[9]):
+            name = match.group(1).strip().lstrip('@')
+            if name and name not in names:
+                names.append(name)
     return names
 
 
@@ -1134,22 +1202,23 @@ def validate_bdn_sup(ass_path: str, out_dir: str, make_sup: bool = True,
             issues.append('缺少 SUP 文件')
         else:
             try:
-                with open(sup_path, 'rb') as handle:
-                    data = handle.read()
                 pcs = []
-                index = 0
-                length = len(data)
-                while index + 13 <= length:
-                    if data[index:index + 2] == b'PG':
-                        pts = int.from_bytes(
-                            data[index + 2:index + 6], 'big') & 0x3FFFFFFF
-                        segment_type = data[index + 10]
-                        size = int.from_bytes(data[index + 11:index + 13], 'big')
-                        if segment_type == 0x14:
-                            pcs.append(pts / 90.0)
-                        index += 13 + size
-                    else:
-                        index += 1
+                file_size = os.path.getsize(sup_path)
+                if file_size:
+                    with open(sup_path, 'rb') as handle, mmap.mmap(
+                            handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
+                        index = 0
+                        while index + 13 <= file_size:
+                            if data[index:index + 2] == b'PG':
+                                pts = int.from_bytes(
+                                    data[index + 2:index + 6], 'big') & 0x3FFFFFFF
+                                segment_type = data[index + 10]
+                                size = int.from_bytes(data[index + 11:index + 13], 'big')
+                                if segment_type == 0x14:
+                                    pcs.append(pts / 90.0)
+                                index += 13 + size
+                            else:
+                                index += 1
                 info['pcs'] = len(pcs)
                 if not pcs:
                     issues.append('SUP 中没有显示段（PCS=0）')

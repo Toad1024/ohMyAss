@@ -2,6 +2,7 @@
 
 
 import os
+import io
 import json
 import csv
 import queue
@@ -14,15 +15,15 @@ from config_store import load_config, log_exception, save_config
 import theme_ui
 from theme_ui import (
     ToolTip, UI_ACCENT, UI_BG, UI_BODY_SIZE,
-    UI_CARD, UI_DANGER, UI_FIELD, UI_FIELD_BORDER,
+    UI_CARD, UI_CONFIRM, UI_DANGER, UI_FIELD, UI_FIELD_BORDER,
     UI_FONT, UI_MUTED, UI_SELECT, UI_SMALL_SIZE,
-    UI_TEXT, UI_WARNING, add_combo_arrow, create_card,
+    UI_TEXT, add_combo_arrow, create_card,
     create_hero, prepare_combobox, px,
 )
 from reports import NOTICES_DATA_NAME, parse_issue_entries
 from subtitle_core import (
     EDIT_SOURCE_PREFIX, format_ass_time, normalize_glossary, parse_ass_time,
-    process_file,
+    process_file, srt_to_ass,
 )
 from bdn_sup import read_ass_text
 
@@ -253,18 +254,30 @@ class GlossaryPanel(ttk.Frame):
         if not path:
             return
         try:
-            with open(path, 'r', encoding='utf-8-sig', newline='') as handle:
-                sample = handle.read(4096)
-                handle.seek(0)
-                try:
-                    dialect = csv.Sniffer().sniff(sample, delimiters=',\t;')
-                except csv.Error:
-                    dialect = csv.excel
-                rows = list(csv.reader(handle, dialect))
-        except (OSError, UnicodeError) as exc:
+            with open(path, 'rb') as handle:
+                raw = handle.read()
+        except OSError as exc:
             messagebox.showerror(
                 '导入失败', str(exc), parent=self.winfo_toplevel())
             return
+        text = None
+        for encoding in ('utf-8-sig', 'gb18030'):
+            try:
+                text = raw.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        if text is None:
+            messagebox.showerror(
+                '导入失败', '无法识别文件编码（支持 UTF-8 / GBK）',
+                parent=self.winfo_toplevel())
+            return
+        sample = text[:4096]
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=',\t;')
+        except csv.Error:
+            dialect = csv.excel
+        rows = list(csv.reader(io.StringIO(text), dialect))
         imported = []
         for row in rows:
             if len(row) < 2:
@@ -339,6 +352,7 @@ class IssueFixerPanel(ttk.Frame):
         self.data = None
         self.output_dir = ''
         self.source_path = ''
+        self.source_is_srt = False
         self.dialogues = []
         self.source_lines = []
         self.styles = []
@@ -418,7 +432,7 @@ class IssueFixerPanel(ttk.Frame):
         tree_scroll.grid(row=0, column=1, sticky='ns')
         self.tree.configure(yscrollcommand=tree_scroll.set)
         self.tree.tag_configure('process', foreground=UI_DANGER)
-        self.tree.tag_configure('verify', foreground=UI_WARNING)
+        self.tree.tag_configure('verify', foreground=UI_CONFIRM)
         self.tree.bind('<<TreeviewSelect>>', self.on_select)
 
         bottom = tk.Frame(list_body, bg=UI_CARD)
@@ -541,7 +555,14 @@ class IssueFixerPanel(ttk.Frame):
                     f'{exc}\n\n请先用当前版本重新生成一次字幕，输出文件夹里会生成「{NOTICES_DATA_NAME}」。',
                     parent=self.winfo_toplevel())
             return
-        source_path = data.get('source', '')
+        if not isinstance(data, dict):
+            if not silent:
+                messagebox.showerror(
+                    '无法读取',
+                    f'问题数据格式不正确。\n\n请先用当前版本重新生成一次字幕，输出文件夹里会生成「{NOTICES_DATA_NAME}」。',
+                    parent=self.winfo_toplevel())
+            return
+        source_path = str(data.get('source') or '')
         if not os.path.isfile(source_path):
             if not silent:
                 messagebox.showerror(
@@ -553,6 +574,12 @@ class IssueFixerPanel(ttk.Frame):
                 messagebox.showerror(
                     '无法读取源字幕', '源字幕为空或无法识别编码', parent=self.winfo_toplevel())
             return
+        # SRT 源同样要按 ASS 行号定位对白
+        source_is_srt = (
+            source_path.lower().endswith('.srt')
+            or ('[Events]' not in text and '-->' in text))
+        if source_is_srt:
+            text = srt_to_ass(text)
         lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
         dialogues = []
         in_events = False
@@ -581,8 +608,9 @@ class IssueFixerPanel(ttk.Frame):
         }
 
         self.data = data
-        self.output_dir = data.get('output_dir') or os.path.dirname(path)
+        self.output_dir = str(data.get('output_dir') or os.path.dirname(path))
         self.source_path = source_path
+        self.source_is_srt = source_is_srt
         self.dialogues = dialogues
         self.source_lines = lines
         self.styles = styles
@@ -687,8 +715,14 @@ class IssueFixerPanel(ttk.Frame):
                     return
                 self.edits[result[0]] = result[1]
 
-        text = read_ass_text(self.source_path)
-        lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+        if getattr(self, 'source_lines', None):
+            # 与载入时使用同一份转换结果，保证行号一致
+            lines = list(self.source_lines)
+        else:
+            text = read_ass_text(self.source_path)
+            if getattr(self, 'source_is_srt', False):
+                text = srt_to_ass(text)
+            lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
         for index, edit in self.edits.items():
             if not 1 <= index <= len(self.dialogues):
                 continue
@@ -703,11 +737,15 @@ class IssueFixerPanel(ttk.Frame):
             fields[9] = edit['text']
             lines[line_index] = ','.join(fields)
 
-        output_dir = self.output_dir or self.data.get('output_dir', '')
+        output_dir = self.output_dir or str(self.data.get('output_dir') or '')
         if not output_dir:
             messagebox.showerror('缺少输出目录', '问题数据里没有输出目录信息', parent=self.winfo_toplevel())
             return
-        extension = os.path.splitext(self.source_path)[1] or '.ass'
+        if getattr(self, 'source_is_srt', False):
+            # SRT 在载入时已转换为 ASS，重新生成也用 ASS
+            extension = '.ass'
+        else:
+            extension = os.path.splitext(self.source_path)[1] or '.ass'
         working = os.path.join(output_dir, f'{EDIT_SOURCE_PREFIX}{extension}')
         if os.path.abspath(self.source_path) == os.path.abspath(working):
             working = self.source_path

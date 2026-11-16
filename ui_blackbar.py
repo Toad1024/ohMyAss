@@ -2,7 +2,9 @@
 
 
 import os
+import queue
 import statistics
+import threading
 import tkinter as tk
 from collections import Counter
 from tkinter import filedialog, messagebox, ttk
@@ -47,6 +49,10 @@ class BlackBarDetectorWindow:
             pass
         self.window.protocol("WM_DELETE_WINDOW", self.close)
         self.results = []
+        self.analysis_queue = queue.Queue()
+        self.analysis_stop = threading.Event()
+        self.analysis_active = False
+        self._last_analysed_name = ''
         self.build_ui()
         center_window(self.window, master)
 
@@ -182,6 +188,9 @@ class BlackBarDetectorWindow:
             return
         if not paths:
             return
+        if self.analysis_active:
+            # 上一批还在检测，忽略新的拖放/选择，避免结果串批
+            return
 
         self.btn_select.config(state='disabled')
         self.btn_clear.config(state='disabled')
@@ -189,44 +198,81 @@ class BlackBarDetectorWindow:
         self.result_text.config(state='normal')
         self.result_text.delete('1.0', 'end')
         self.result_text.config(state='disabled')
+        self.progress['maximum'] = 100
+        self.progress['value'] = 0
+        self.analysis_stop.clear()
+        self.analysis_active = True
+        threading.Thread(
+            target=self._analyse_worker, args=(list(paths),), daemon=True).start()
+        self.window.after(50, self._poll_analysis)
 
+    def _analyse_worker(self, paths):
         total = len(paths)
         for index, path in enumerate(paths, 1):
+            if self.analysis_stop.is_set():
+                break
             filename = os.path.basename(path)
-            self.status_var.set(f"正在检测 {index}/{total}: {filename}")
-            self.progress['maximum'] = 100
-            self.progress['value'] = 0
-            self.window.update_idletasks()
+            self.analysis_queue.put(('start', index, total, filename))
 
             def progress_callback(current, maximum):
-                self.progress['maximum'] = maximum
-                self.progress['value'] = current
-                self.window.update_idletasks()
+                self.analysis_queue.put(('progress', current, maximum))
 
             try:
                 result = detect_black_bars(path, progress_callback)
             except Exception as exc:
                 log_exception(f'黑边检测：{filename}', exc)
-                self.append_result(f"【{filename}】\n检测失败：{exc}\n")
+                self.analysis_queue.put(('error', filename, str(exc)))
                 continue
+            self.analysis_queue.put(('result', result, filename))
+        self.analysis_queue.put(('finished',))
 
-            self.results.append(result)
-            mid_hint = '勾选' if result['type'] == '中黑边' else '不勾选'
-            self.append_result(
-                f"【{filename}】\n"
-                f"分辨率：{result['width']}×{result['height']}\n"
-                f"上黑边：{result['top']} px\n"
-                f"下黑边：{result['bottom']} px\n"
-                f"总黑边：{result['top'] + result['bottom']} px\n"
-                f"1080p 等效下黑边：{result['scaled_bottom']:.1f} px\n"
-                f"黑边类型：{result['type']}\n"
-                f"中黑边勾选参考：{mid_hint}\n"
-            )
+    def _poll_analysis(self):
+        try:
+            while True:
+                item = self.analysis_queue.get_nowait()
+                kind = item[0]
+                if kind == 'start':
+                    self._last_analysed_name = item[3]
+                    self.status_var.set(
+                        f'正在检测 {item[1]}/{item[2]}: {item[3]}')
+                    self.progress['value'] = 0
+                elif kind == 'progress':
+                    self.progress['maximum'] = item[2]
+                    self.progress['value'] = item[1]
+                elif kind == 'result':
+                    self._add_analysis_result(item[1])
+                elif kind == 'error':
+                    self.append_result(f'【{item[1]}】\n检测失败：{item[2]}\n')
+                elif kind == 'finished':
+                    self._finish_analysis()
+                    return
+        except queue.Empty:
+            pass
+        try:
+            self.window.after(50, self._poll_analysis)
+        except tk.TclError:
+            self.analysis_active = False
 
+    def _add_analysis_result(self, result):
+        self.results.append(result)
+        mid_hint = '勾选' if result['type'] == '中黑边' else '不勾选'
+        self.append_result(
+            f"【{self._last_analysed_name}】\n"
+            f"分辨率：{result['width']}×{result['height']}\n"
+            f"上黑边：{result['top']} px\n"
+            f"下黑边：{result['bottom']} px\n"
+            f"总黑边：{result['top'] + result['bottom']} px\n"
+            f"1080p 等效下黑边：{result['scaled_bottom']:.1f} px\n"
+            f"黑边类型：{result['type']}\n"
+            f"中黑边勾选参考：{mid_hint}\n"
+        )
+
+    def _finish_analysis(self):
+        self.analysis_active = False
         if len(self.results) > 1:
             self.append_summary()
         elif len(self.results) == 1:
-            self.status_var.set(f"检测完成：{os.path.basename(paths[0])}")
+            self.status_var.set(f"检测完成：{self._last_analysed_name}")
         else:
             self.status_var.set("未成功检测到图片")
 
@@ -269,4 +315,5 @@ class BlackBarDetectorWindow:
         self.status_var.set(f"检测完成：共 {len(self.results)} 张图片")
 
     def close(self):
+        self.analysis_stop.set()
         self.window.destroy()

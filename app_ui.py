@@ -6,6 +6,7 @@ import sys
 import re
 import queue
 import threading
+import time
 import traceback
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -45,15 +46,22 @@ from theme_ui import (
     theme_fg_map, theme_is_dark, theme_mode_from_config, theme_switch_map,
 )
 from reports import NOTICES_DATA_NAME, NOTICES_REPORT_NAME, TAIWAN_REPORT_NAME
-from fonts import ensure_source_han_font, source_han_medium_installed
-from subtitle_core import (
-    FSVP_EDIT_KINDS, FSVP_PAIRS, HDR_SUB_BRIGHTNESS, LEGACY_STYLE_NAMES,
-    STYLE_CATEGORIES, STYLE_KIND_ALIASES, STYLE_KIND_TO_LABEL, STYLE_LABEL_TO_KIND,
-    apply_updated_fontsize, apply_updated_margin_v, default_style_line, linked_fsvp_kinds,
-    process_file, rename_style_line, style_line_name,
+from fonts import (
+    ensure_source_han_font, installed_font_records, source_han_medium_installed,
 )
-from app_update import apply_app_update, download_app_update, fetch_app_update
-from bdn_sup import BDN_TOOL_ROOT, bdn_tool_version_text, install_all_bdn_tools
+from subtitle_core import (
+    FSVP_EDIT_KINDS, FSVP_PAIRS, HDR_SUB_BRIGHTNESS,
+    STYLE_CATEGORIES, STYLE_KIND_TO_LABEL, STYLE_LABEL_TO_KIND,
+    apply_updated_fontsize, apply_updated_margin_v, default_style_line, linked_fsvp_kinds,
+    process_file, style_line_name,
+)
+from app_update import (
+    apply_app_update, discard_app_update, download_app_update, fetch_app_update,
+)
+from bdn_sup import (
+    BDN_TOOL_ROOT, bdn_tool_version_text, bdn_tools_status_text,
+    install_all_bdn_tools,
+)
 from ui_widgets import PlaceholderEntry, enable_file_drop, split_dropped_paths
 from ui_blackbar import BlackBarDetectorWindow
 from ui_style import StyleEditor, StylePreviewWindow
@@ -183,6 +191,11 @@ class App:
         self.nav_photo_cache = {}
         self.app_update_checking = False
         self.app_update_url = ''
+        self.app_update_digest = ''
+        try:
+            self.last_update_check = float(config.get('last_update_check') or 0)
+        except (TypeError, ValueError):
+            self.last_update_check = 0.0
         self.app_update_queue = queue.Queue()
         self.initWidgets()
         self._apply_theme_options()
@@ -324,16 +337,20 @@ class App:
 
     def on_close(self):
         if self.processing:
-            if not messagebox.askyesno(
-                    '正在生成', '字幕正在生成中，确定要退出吗？', parent=self.root):
-                return
+            messagebox.showinfo(
+                '正在生成', '字幕正在生成，请等待完成后再退出。', parent=self.root)
+            return
         if getattr(self, 'sup_panel', None) and self.sup_panel.running:
             if not messagebox.askyesno('正在生成', 'SUP 正在生成中，确定要退出吗？', parent=self.root):
                 return
             self.sup_panel.cancel_event.set()
+            self._close_wait_count = 0
+            self._wait_sup_cancel_and_close()
+            return
         if getattr(self, 'fixer_panel', None) and self.fixer_panel.running:
-            if not messagebox.askyesno('正在生成', '问题修复正在重新生成字幕，确定要退出吗？', parent=self.root):
-                return
+            messagebox.showinfo(
+                '正在生成', '问题修复正在重新生成字幕，请等待完成后再退出。', parent=self.root)
+            return
         if getattr(self, 'fixer_panel', None) and self.fixer_panel.dirty:
             if not messagebox.askyesno('未保存', '问题修复的修改尚未生成，确定要退出吗？', parent=self.root):
                 return
@@ -354,6 +371,15 @@ class App:
         save_config(config)
         self.root.destroy()
 
+    def _wait_sup_cancel_and_close(self):
+        panel = getattr(self, 'sup_panel', None)
+        if (panel is not None and panel.running
+                and getattr(self, '_close_wait_count', 0) < 50):
+            self._close_wait_count += 1
+            self.root.after(100, self._wait_sup_cancel_and_close)
+            return
+        self._save_config_and_destroy()
+
     def _current_config_values(self):
         values = {
             'title': self.title.get_value(),
@@ -373,6 +399,8 @@ class App:
             values['last_error_log'] = self.last_error_log
         if getattr(self, 'theme_mode_var', None) is not None:
             values['theme_mode'] = self.theme_mode_var.get()
+        if getattr(self, 'last_update_check', 0):
+            values['last_update_check'] = self.last_update_check
         return values
 
     def setup_styles(self):
@@ -553,6 +581,9 @@ class App:
                 page.pack(fill='both', expand=True)
             else:
                 page.pack_forget()
+        if key == 'settings' and hasattr(self, 'tool_state_label'):
+            self.refresh_font_status()
+            self.refresh_tool_status()
         self.redraw_nav()
 
     def redraw_nav(self, hover=None):
@@ -808,30 +839,18 @@ class App:
     def _init_style_library(self):
         config = load_config()
         saved = config.get('style_categories')
-        legacy_by_kind = {}
-        for old_kind, new_kind in STYLE_KIND_ALIASES.items():
-            legacy_by_kind.setdefault(new_kind, []).append(old_kind)
         self.style_lines_by_kind = {}
         self.style_fsvp_by_kind = {}
         defaults_updated = False
         for kind, _label in STYLE_CATEGORIES:
             line = default_style_line(kind)
             fsvp = 12.0
-            entry = None
-            if isinstance(saved, dict):
-                if isinstance(saved.get(kind), dict):
-                    entry = saved.get(kind)
-                else:
-                    for old_kind in legacy_by_kind.get(kind, ()):
-                        if isinstance(saved.get(old_kind), dict):
-                            entry = saved.get(old_kind)
-                            break
+            entry = saved.get(kind) if isinstance(saved, dict) else None
             if isinstance(entry, dict):
                 candidate = entry.get('line')
-                if isinstance(candidate, str) and candidate.count(',') >= 21:
-                    name = style_line_name(candidate)
-                    if name == kind or LEGACY_STYLE_NAMES.get(name) == kind:
-                        line = rename_style_line(candidate, kind)
+                if (isinstance(candidate, str) and candidate.count(',') >= 21
+                        and style_line_name(candidate) == kind):
+                    line = candidate
                 try:
                     fsvp = float(entry.get('fsvp', 12.0))
                 except (TypeError, ValueError):
@@ -848,16 +867,6 @@ class App:
                     defaults_updated = True
             self.style_lines_by_kind[kind] = line
             self.style_fsvp_by_kind[kind] = fsvp
-        # 旧版注释样式只有一份行间距，升级后双行注释继承该值
-        if (isinstance(saved, dict)
-                and not isinstance(saved.get('zh_note_double_line'), dict)):
-            self.style_fsvp_by_kind['zh_note_double_line'] = (
-                self.style_fsvp_by_kind['zh_note_single_line'])
-        # 旧版歌词没有独立行间距，升级后英文歌词双语继承英文对白的值
-        if (isinstance(saved, dict)
-                and not isinstance(saved.get('en_lyrics_bilingual'), dict)):
-            self.style_fsvp_by_kind['en_lyrics_bilingual'] = (
-                self.style_fsvp_by_kind['en_dialogue_bilingual'])
         # 双语样式两两共用行间距，以实际参与生成的英文样式值为准
         fsvp_synced = False
         for primary, secondary in FSVP_PAIRS:
@@ -868,18 +877,12 @@ class App:
                     fsvp_synced = True
         active = str(config.get('style_category_active')
                      or 'zh_dialogue_bilingual')
-        active = STYLE_KIND_ALIASES.get(active, active)
         if active not in self.style_lines_by_kind:
             active = 'zh_dialogue_bilingual'
         self.active_style_kind = active
-        legacy_keys = (
-            isinstance(saved, dict)
-            and any(key in saved for key in STYLE_KIND_ALIASES))
-        legacy_active = (str(config.get('style_category_active') or '')
-                         in STYLE_KIND_ALIASES)
         expected_keys = {kind for kind, _ in STYLE_CATEGORIES}
         saved_keys = set(saved) if isinstance(saved, dict) else set()
-        if (legacy_keys or legacy_active or defaults_updated or fsvp_synced
+        if (defaults_updated or fsvp_synced
                 or not expected_keys.issubset(saved_keys)):
             self._save_style_library()
 
@@ -1038,12 +1041,19 @@ class App:
         card.columnconfigure(0, weight=1)
 
         self.tool_label = tk.StringVar(value=bdn_tool_version_text())
+        tool_title = tk.Frame(card, bg=UI_CARD)
+        tool_title.grid(row=0, column=0, sticky='w')
         tk.Label(
-            card, textvariable=self.tool_label, bg=UI_CARD, fg=UI_TEXT,
+            tool_title, textvariable=self.tool_label, bg=UI_CARD, fg=UI_TEXT,
             font=(UI_FONT, UI_BODY_SIZE),
-        ).grid(row=0, column=0, sticky='w')
+        ).pack(side='left')
+        self.tool_state_label = tk.Label(
+            tool_title, text='', bg=UI_CARD, fg=UI_MUTED,
+            font=(UI_FONT, UI_BODY_SIZE))
+        self.tool_state_label.pack(side='left', padx=(10, 0))
         self.btn_update = ttk.Button(card, text='检查更新', command=self.update_tools, style='Secondary.TButton')
         self.btn_update.grid(row=0, column=1, sticky='e')
+        self.refresh_tool_status()
 
         tk.Label(
             card, text='工具安装位置：' + BDN_TOOL_ROOT,
@@ -1084,9 +1094,15 @@ class App:
             font_title, text='', bg=UI_CARD, fg=UI_MUTED, font=(UI_FONT, UI_BODY_SIZE))
         self.font_state_label.pack(side='left', padx=(10, 0))
 
+        font_actions = tk.Frame(font_card, bg=UI_CARD)
+        font_actions.grid(row=0, column=1, sticky='e')
         self.btn_font = ttk.Button(
-            font_card, text='检查并安装', command=self.install_font, style='Secondary.TButton')
-        self.btn_font.grid(row=0, column=1, sticky='e')
+            font_actions, text='检查并安装', command=self.install_font, style='Secondary.TButton')
+        self.btn_font.pack(side='left')
+        self.btn_font_refresh = ttk.Button(
+            font_actions, text='刷新状态', command=self.refresh_font_status,
+            style='Secondary.TButton')
+        self.btn_font_refresh.pack(side='left', padx=(6, 0))
 
         self.font_status = tk.StringVar(value='')
         tk.Label(
@@ -1118,11 +1134,24 @@ class App:
         bind_wheel(content)
 
     def refresh_font_status(self):
+        try:
+            installed_font_records.cache_clear()
+        except AttributeError:
+            pass
         installed = source_han_medium_installed()
         self.font_state_label.config(
             text='已安装' if installed else '未安装',
             fg=UI_SUCCESS if installed else UI_WARNING,
         )
+
+    def refresh_tool_status(self):
+        status = bdn_tools_status_text()
+        self.tool_label.set(bdn_tool_version_text())
+        if status == '已安装':
+            color = UI_SUCCESS
+        else:
+            color = UI_WARNING
+        self.tool_state_label.config(text=status, fg=color)
 
     def _open_directory(self, path, label):
         if path and os.path.isdir(path):
@@ -1206,6 +1235,9 @@ class App:
     def check_app_update(self, silent=False):
         if getattr(self, 'app_update_checking', False):
             return
+        if silent and time.time() - getattr(self, 'last_update_check', 0) < 6 * 3600:
+            # 6 小时内已成功检查过，避免频繁请求 GitHub API
+            return
         self.app_update_checking = True
         self.btn_app_update.config(state='disabled', text='检查中…')
         self.app_update_status.set('正在检查软件更新…')
@@ -1213,12 +1245,14 @@ class App:
 
         def worker():
             try:
-                tag, url, name = fetch_app_update()
-                self.app_update_queue.put(('checked', tag, url, name, '', silent))
-            except Exception as exc:
-                log_exception('检查软件更新', exc)
+                tag, url, name, digest = fetch_app_update()
                 self.app_update_queue.put(
-                    ('checked', '', '', '', str(exc), silent))
+                    ('checked', tag, url, name, digest, '', silent))
+            except Exception as exc:
+                if not silent:
+                    log_exception('检查软件更新', exc)
+                self.app_update_queue.put(
+                    ('checked', '', '', '', '', str(exc), silent))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1245,7 +1279,7 @@ class App:
         if match:
             self.app_update_progress['value'] = int(match.group(1))
 
-    def _app_update_checked(self, tag, url, name, error, silent):
+    def _app_update_checked(self, tag, url, name, digest, error, silent):
         self.app_update_checking = False
         self.btn_app_update.config(state='normal', text='检查软件更新')
         if error:
@@ -1254,6 +1288,8 @@ class App:
                 messagebox.showerror('检查更新失败', error, parent=self.root)
             return
         self.app_update_url = url
+        self.app_update_digest = digest
+        self.last_update_check = time.time()
         if version_tuple(tag) <= version_tuple(APP_VERSION):
             self.app_update_status.set(f'已是最新版本（{APP_VERSION}）')
             if not silent:
@@ -1285,7 +1321,8 @@ class App:
             try:
                 destination = download_app_update(
                     self.app_update_url,
-                    log=lambda text: self.app_update_queue.put(('progress', text)))
+                    log=lambda text: self.app_update_queue.put(('progress', text)),
+                    digest=self.app_update_digest)
                 self.app_update_queue.put(('downloaded', destination))
             except Exception as exc:
                 log_exception('下载软件更新', exc)
@@ -1299,6 +1336,9 @@ class App:
         self.app_update_status.set('更新已下载完成')
         if not messagebox.askyesno(
                 '更新就绪', '新版本已下载，是否立即重启软件并完成更新？', parent=self.root):
+            # 用户选择稍后更新：删除临时下载，避免占满 %TEMP%
+            discard_app_update(path)
+            self.app_update_status.set('更新已下载，可稍后重新检查并更新')
             return
         ok, message = apply_app_update(path)
         if not ok:
@@ -1348,7 +1388,7 @@ class App:
                     ok, message = item[1], item[2]
                     self.settings_progress['value'] = 100 if ok else 0
                     self.btn_update.config(state='normal', text='检查更新')
-                    self.tool_label.set(bdn_tool_version_text())
+                    self.refresh_tool_status()
                     self.settings_status.set('工具已是最新版本' if ok else f'更新失败：{message}')
                     if not ok:
                         messagebox.showerror('更新失败', message, parent=self.root)
@@ -1565,14 +1605,19 @@ class App:
             'style_lines': self._style_lines_list(),
             'glossary': self.glossary_panel.get_entries(),
         }
-        try:
-            brightness = float(self.hdr_brightness.get().strip())
-        except ValueError:
-            brightness = 0.0
-        if not 1 <= brightness <= 1000:
-            messagebox.showinfo("提示", "字幕亮度请填写 1 到 1000 之间的数字（单位 nit）", parent=self.root)
-            return
-        meta['hdr_brightness'] = brightness
+        if self.is_HDR.get():
+            try:
+                brightness = float(self.hdr_brightness.get().strip())
+            except ValueError:
+                brightness = 0.0
+            if not 1 <= brightness <= 1000:
+                messagebox.showinfo(
+                    "提示", "字幕亮度请填写 1 到 1000 之间的数字（单位 nit）", parent=self.root)
+                return
+            meta['hdr_brightness'] = brightness
+        else:
+            # 非 HDR 模式不校验亮度输入
+            meta['hdr_brightness'] = HDR_SUB_BRIGHTNESS
 
         title = meta['title']
         updated_by = meta['script_updated_by']

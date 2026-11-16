@@ -4,7 +4,7 @@
 
 ![ohMyAss Noto](ohMyAss%20Noto.png)
 
-> 当前版本：**v0.5.11** ｜ 平台：Windows 10 / 11（x64）
+> 当前版本：**v0.6.0** ｜ 平台：Windows 10 / 11（x64）
 
 ---
 
@@ -58,7 +58,7 @@
 pip install pillow zhconv tkinterdnd2
 
 # 入口文件名带空格，必须加引号
-python "ohMyAss Noto v0.5.11.py"
+python "ohMyAss Noto.py"
 ```
 
 ---
@@ -112,7 +112,7 @@ HDR 模式额外产出 SDR 对照版本（如 `2-简英双语-SDR-zh.ass`），�
 ## 目录结构
 
 ```
-ohMyAss Noto v0.5.11.py   入口：单实例检查、主窗口启动
+ohMyAss Noto.py          入口：单实例检查、主窗口启动
 app_info.py              版本号与资源路径
 config_store.py          配置、错误日志、路径工具
 download_utils.py        下载与发布页解析
@@ -167,11 +167,11 @@ python -m unittest discover -s tests -v
 
 ```powershell
 python -m PyInstaller --noconfirm --clean --onefile --windowed `
-  --name "ohMyAss Noto v0.5.11" `
+  --name "ohMyAss Noto" `
   --icon "ohMyAss Noto.ico" --version-file version_info.txt `
   --add-data "ohMyAss Noto.ico;." --add-data "ohMyAss Noto.png;." `
   --add-data "bin\*;." --collect-all tkinterdnd2 --collect-data zhconv `
-  "ohMyAss Noto v0.5.11.py"
+  "ohMyAss Noto.py"
 ```
 
 > `--collect-data zhconv` 必须保留：zhconv 的 `zhcdict.json` 不随模块自动打包，缺失时生成文本字幕会报 `FileNotFoundError`。
@@ -223,6 +223,16 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed `
 ---
 
 ## 更新日志
+
+### v0.6.0
+
+- **在线更新**：启动自动检查与设置页手动检查，下载后校验 SHA-256，关闭软件、替换 EXE 并自动启动新版本
+- **术语表**：新增术语表页面，支持导入/导出 CSV，并在生成时检查译文与术语表是否一致
+- **样式修改与预览**：10 类固定样式可编辑、恢复默认，支持行间距缩进，并可打开 1080p 样式预览
+- **图形字幕生成队列**：支持多 ASS 排队渲染，显示逐条进度、完成/失败状态，可取消，输出 BDN XML + PNG + SUP（可选 PES/MUI）
+- 问题报告与问题修复页：生成 `字幕问题报告.html` / `字幕问题数据.json`，按「请处理 / 请确认」逐条修改并重新生成
+- 其他：深色主题与高 DPI、HDR 颜色映射、繁化姬台湾化、黑边检测、模块化源码与单元测试
+- 文件名统一为 `ohMyAss Noto`，不再带版本号；旧版本样式名/报告级别不再兼容
 
 ### v0.5.11
 

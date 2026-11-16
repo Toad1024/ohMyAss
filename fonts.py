@@ -262,9 +262,14 @@ def ensure_source_han_font(log=None):
                     log(f'正在下载 {SOURCE_HAN_FONT_LABEL}…')
                 download_file(url, dest, log=log, timeout=180)
                 if os.path.isfile(dest) and os.path.getsize(dest) > 1024 * 1024:
-                    downloaded = True
-                    break
-                last_error = '下载文件不完整'
+                    with open(dest, 'rb') as handle:
+                        head = handle.read(4)
+                    if head in (b'OTTO', b'\x00\x01\x00\x00', b'true', b'ttcf'):
+                        downloaded = True
+                        break
+                    last_error = '字体文件格式异常（下载内容可能不是字体）'
+                else:
+                    last_error = '下载文件不完整'
             except Exception as exc:
                 last_error = str(exc)
         if not downloaded:

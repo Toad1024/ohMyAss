@@ -2,6 +2,9 @@
 
 import json
 import os
+import shutil
+import sys
+import tempfile
 import time
 import traceback
 
@@ -18,10 +21,16 @@ MAX_FOLDER_NAME_LENGTH = 120
 
 CONFIG_PATH = os.path.join(os.path.expanduser('~'), 'ohMyAssNoto.json')
 ERROR_LOG_PATH = os.path.join(os.path.expanduser('~'), 'ohMyAssNoto_error.log')
+MAX_LOG_BYTES = 1024 * 1024
 
 
 def log_exception(context: str, exc=None):
-    """把被忽略的异常追加到用户目录日志，避免错误完全消失。"""
+    """把被忽略的异常追加到用户目录日志，超过 1MB 时轮转一次。"""
+    try:
+        if os.path.isfile(ERROR_LOG_PATH) and os.path.getsize(ERROR_LOG_PATH) > MAX_LOG_BYTES:
+            os.replace(ERROR_LOG_PATH, ERROR_LOG_PATH + '.1')
+    except OSError:
+        pass
     try:
         with open(ERROR_LOG_PATH, 'a', encoding='utf-8') as handle:
             handle.write(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] {context}\n')
@@ -78,11 +87,57 @@ def load_config() -> dict:
 
 
 def save_config(data: dict):
+    """先写临时文件再替换，避免中途失败把配置写坏。"""
+    temp_path = CONFIG_PATH + '.tmp'
     try:
-        with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+        with open(temp_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(temp_path, CONFIG_PATH)
     except (OSError, TypeError, ValueError) as exc:
         log_exception('保存配置', exc)
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+
+
+def cleanup_stale_temp_folders(max_age_seconds: int = 7 * 86400, base: str = None):
+    """清理一周前的 PyInstaller 解压目录与更新临时目录。
+
+    先改名再删除：仍在运行的 _MEI 目录通常无法改名，可避免误删。
+    """
+    root = base or tempfile.gettempdir()
+    current = ''
+    meipass = getattr(sys, '_MEIPASS', '')
+    if meipass:
+        current = os.path.abspath(meipass).lower()
+    now = time.time()
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return
+    for name in entries:
+        if not (name.startswith('_MEI') or name.startswith('oma_update_')):
+            continue
+        path = os.path.join(root, name)
+        if not os.path.isdir(path):
+            continue
+        if current and os.path.abspath(path).lower() == current:
+            continue
+        try:
+            if now - os.path.getmtime(path) < max_age_seconds:
+                continue
+        except OSError:
+            continue
+        stale = path + '.stale'
+        try:
+            if os.path.exists(stale):
+                shutil.rmtree(stale, ignore_errors=True)
+            os.rename(path, stale)
+        except OSError:
+            # 仍被占用，跳过
+            continue
+        shutil.rmtree(stale, ignore_errors=True)
 
 
 def write_text_with_fallback(path: str, content: str) -> str:
