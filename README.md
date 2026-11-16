@@ -4,7 +4,7 @@
 
 ![ohMyAss Noto](ohMyAss%20Noto.png)
 
-> 当前版本：**v0.5.8** ｜ 平台：Windows 10 / 11（x64）
+> 当前版本：**v0.5.9** ｜ 平台：Windows 10 / 11（x64）
 
 ---
 
@@ -57,8 +57,8 @@
 ```powershell
 pip install pillow zhconv tkinterdnd2
 
-# 注意文件名带空格，必须加引号
-python "ohMyAss Noto v0.5.8.py"
+# 入口文件名带空格，必须加引号
+python "ohMyAss Noto v0.5.9.py"
 ```
 
 ---
@@ -112,7 +112,23 @@ HDR 模式额外产出 SDR 对照版本（如 `2-简英双语-SDR-zh.ass`），�
 ## 目录结构
 
 ```
-ohMyAss Noto v0.5.8.py   主程序（单文件）
+ohMyAss Noto v0.5.9.py   入口：单实例检查、主窗口启动
+app_info.py              版本号与资源路径
+config_store.py          配置、错误日志、路径工具
+download_utils.py        下载与发布页解析
+theme_ui.py              主题令牌、DPI、字体、图标、通用控件
+reports.py               HTML 报告与问题数据解析
+subtitle_core.py         ASS/SRT 解析、HDR、术语、文本规则、生成流程
+fonts.py                 字体注册与思源黑体安装
+bdn_sup.py               BDN/SUP/PES 生成与 VSFilterMod 渲染
+app_update.py            软件自身在线更新
+app_ui.py                主窗口与面板组装
+ui_widgets.py            拖放与占位输入框
+ui_blackbar.py           黑边检测窗口
+ui_style.py              样式编辑器与预览
+ui_fixer.py              术语表与问题修复面板
+ui_bdn.py                图形字幕面板与任务队列
+tests/                   单元测试
 ohMyAss Noto.ico         应用图标
 ohMyAss Noto.png         展示图
 version_info.txt         PyInstaller 版本资源
@@ -123,11 +139,36 @@ bin/                     图形字幕运行时依赖
   avs2bdnxml.exe          ASS → BDN XML
 ```
 
+## 源码结构与测试
+
+源码按职责拆分，依赖方向为「基础工具 → 字幕核心 → 渲染/更新 → UI」，没有循环导入：
+
+```text
+app_info / config_store / download_utils
+        ↓
+theme_ui / reports / fonts
+        ↓
+subtitle_core
+        ↓
+app_update / bdn_sup
+        ↓
+ui_widgets → ui_blackbar / ui_style / ui_fixer / ui_bdn
+        ↓
+app_ui → 入口
+```
+
+运行单元测试（时间轴、样式、术语、报告解析、配置、更新脚本）：
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
 ## 本地数据位置
 
 | 内容 | 路径 |
 |---|---|
 | 界面配置、上次填写的片名等 | `%USERPROFILE%\ohMyAssNoto.json` |
+| 错误日志（异常兜底记录） | `%USERPROFILE%\ohMyAssNoto_error.log` |
 | 自动下载的外部工具 | `%LOCALAPPDATA%\ohMyAssNoto\tools` |
 
 ---
@@ -170,10 +211,19 @@ bin/                     图形字幕运行时依赖
 
 ## 更新日志
 
+### v0.5.9
+
+- 源码由单文件拆分为 16 个模块：主题、字幕核心、报告、字体、BDN、更新与 UI 分层，无循环导入
+- 新增 20 个单元测试：时间轴、样式默认值、术语一致性、报告解析、配置读写、更新脚本
+- 宽泛的 `except Exception` 由 40 处收窄到 11 处，新增 `%USERPROFILE%\ohMyAssNoto_error.log` 记录被忽略的异常
+- 中黑边边距改为按「默认边距 + 44」生成；SRT 转换头部复用内置 Default 样式常量
+- 更新下载完成后的弹窗文案改为「是否立即重启软件并完成更新」
+- 拆分后深色主题同步、字体刷新、面板行为与更新流程保持不变
+
 ### v0.5.8
 
 - 修复自动更新点击重启后没有反应：更新批处理不再写入错误的换行（此前每行变成 CR CR LF，导致路径变量带上多余字符，复制失败）
-- 更新批处理改为二进制写入，路径优先使用 8.3 短路径，避免中文和空格路径受代码页影响
+- 更新批处理改为二进制写入，路径通过环境变量传递，脚本内容保持纯 ASCII，不受系统代码页、中文路径和空格路径影响
 - 更新流程增加替换重试、写入权限检查与 `ohMyAssNoto_update.log` 日志，成功复制后再启动新版本
 - 更新完成后自动清理下载的临时文件
 - 图形字幕：ASS 文本按文件缓存、队列进度合并重绘、渐变颜色与表头重绘优化
