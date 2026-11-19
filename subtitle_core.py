@@ -32,7 +32,7 @@ match_paragraph_aegisub = re.compile(r'\[Aegisub Project Garbage\]', re.I)
 match_script_info_play_x = re.compile(r'PlayResX: *(\d+)', re.I)
 match_script_info_play_y = re.compile(r'PlayResY: *(\d+)', re.I)
 
-match_events_dialogue = re.compile(r'Dialogue', re.I)
+match_events_dialogue = re.compile(r'^\s*Dialogue:', re.I)
 match_events_newline = re.compile(r'\\N')
 match_events_fs = re.compile(r'\\fs(\d+)', re.I)
 
@@ -1686,7 +1686,8 @@ def convert_cht_contents(lines, indexes=None, use_api=True):
     return result, changes, error, overlong
 
 
-def process_file(filename: str, is_HDR: bool, is_mid_black: bool, meta: dict = None):
+def process_file(filename: str, is_HDR: bool, is_mid_black: bool, meta: dict = None,
+                 write_outputs: bool = True):
     meta = meta or {}
     sub = Aegisub(filename, is_HDR, is_mid_black)
     custom_styles = meta.get('style_lines')
@@ -1883,18 +1884,19 @@ def process_file(filename: str, is_HDR: bool, is_mid_black: bool, meta: dict = N
             if use_taiwan:
                 sub.add_notice(f'台湾化后单行过长，中文：{item["length"]},请处理', index=item['index'])
         report_path = os.path.join(output_dir, TAIWAN_REPORT_NAME)
-        if use_taiwan and (taiwan_changes or taiwan_error):
-            write_text_with_fallback(
-                report_path,
-                build_taiwan_compare_html(title, filename, taiwan_changes, taiwan_error),
-            )
-            if taiwan_error:
-                sub.add_notice('繁化姬台湾化失败,请处理', index=0)
-        elif os.path.exists(report_path):
-            try:
-                os.remove(report_path)
-            except OSError:
-                pass
+        if taiwan_error:
+            sub.add_notice('繁化姬台湾化失败,请处理', index=0)
+        if write_outputs:
+            if use_taiwan and (taiwan_changes or taiwan_error):
+                write_text_with_fallback(
+                    report_path,
+                    build_taiwan_compare_html(title, filename, taiwan_changes, taiwan_error),
+                )
+            elif os.path.exists(report_path):
+                try:
+                    os.remove(report_path)
+                except OSError:
+                    pass
 
     # HDR 时额外另存一份未做 HDR 颜色映射的 SDR 版本
     sdr_content = None
@@ -1916,24 +1918,25 @@ def process_file(filename: str, is_HDR: bool, is_mid_black: bool, meta: dict = N
             ]
 
     renamed_outputs = []
-    for key, value in sub.contents.items():
-        if sub.source_is_chinese_only and value in (OUT_BILINGUAL, OUT_ENG):
-            continue
-        file = os.path.join(output_dir, f'{key}.ass')
-        saved = write_text_with_fallback(file, ''.join(contents[f'{value}']))
-        if os.path.basename(saved) != os.path.basename(file):
-            renamed_outputs.append((os.path.basename(file), os.path.basename(saved)))
+    if write_outputs:
+        for key, value in sub.contents.items():
+            if sub.source_is_chinese_only and value in (OUT_BILINGUAL, OUT_ENG):
+                continue
+            file = os.path.join(output_dir, f'{key}.ass')
+            saved = write_text_with_fallback(file, ''.join(contents[f'{value}']))
+            if os.path.basename(saved) != os.path.basename(file):
+                renamed_outputs.append((os.path.basename(file), os.path.basename(saved)))
 
-    if sdr_content is not None:
-        file = os.path.join(output_dir, sdr_name)
-        saved = write_text_with_fallback(
-            file, ''.join(build_sdr_bilingual_lines(sub, sdr_content)))
-        if os.path.basename(saved) != os.path.basename(file):
-            renamed_outputs.append((os.path.basename(file), os.path.basename(saved)))
+        if sdr_content is not None:
+            file = os.path.join(output_dir, sdr_name)
+            saved = write_text_with_fallback(
+                file, ''.join(build_sdr_bilingual_lines(sub, sdr_content)))
+            if os.path.basename(saved) != os.path.basename(file):
+                renamed_outputs.append((os.path.basename(file), os.path.basename(saved)))
 
-    for expected, saved in renamed_outputs:
-        sub.add_notice(
-            f'输出文件被占用，{expected} 已另存为 {saved},请检查', index=0)
+        for expected, saved in renamed_outputs:
+            sub.add_notice(
+                f'输出文件被占用，{expected} 已另存为 {saved},请检查', index=0)
 
     sub.check_timeline_overlaps()
     sub.check_timeline_gaps()

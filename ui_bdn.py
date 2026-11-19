@@ -20,7 +20,6 @@ from theme_ui import (
     create_card, create_hero, hex_to_rgb, prepare_combobox,
     px,
 )
-from subtitle_core import format_ass_time
 from bdn_sup import (
     BDN_FORMATS, BDN_FORMAT_FPS, BDN_FPS, BDN_PARAM_DEFAULTS,
     BDN_PARAM_HELP, BDN_QUANTIZERS, RenderCancelled, cleanup_bdn_outputs,
@@ -242,6 +241,10 @@ class QueueList(tk.Frame):
         self.canvas.bind('<MouseWheel>', self._on_wheel)
         self.canvas.bind('<Delete>', lambda event: self.remove_selected())
         self.canvas.bind('<Control-a>', lambda event: self.select_all())
+        self.queue_menu = tk.Menu(self.canvas, tearoff=0)
+        self.queue_menu.add_command(
+            label='从队列移除', command=self.remove_selected)
+        self.canvas.bind('<Button-3>', self._show_queue_menu)
         self.redraw()
         self._draw_header()
 
@@ -326,7 +329,7 @@ class QueueList(tk.Frame):
         self._schedule_progress_redraw()
 
     def remove_selected(self):
-        if not self.selected:
+        if self.running or not self.selected:
             return 0
         indexes = sorted(self.selected, reverse=True)
         for index in indexes:
@@ -375,6 +378,20 @@ class QueueList(tk.Frame):
         max_offset = max(0, len(self.items) - self.VISIBLE_ROWS)
         self.offset = max(0, min(max_offset, self.offset + delta))
         self.redraw()
+
+    def _show_queue_menu(self, event):
+        index = self.offset + int(event.y // self.ROW_HEIGHT)
+        if not (0 <= index < len(self.items)):
+            return
+        if index not in self.selected:
+            self.selected = {index}
+            self.redraw()
+        self.queue_menu.entryconfigure(
+            0, state='disabled' if self.running else 'normal')
+        try:
+            self.queue_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.queue_menu.grab_release()
 
     def _on_scroll(self, action, *args):
         max_offset = max(0, len(self.items) - self.VISIBLE_ROWS)
@@ -533,7 +550,9 @@ class BdnSupPanel(ttk.Frame):
         attach_entry_placeholder(
             self.out_entry, self.out_var,
             '生成到 <输出文件夹>/<字幕名>_BDN；默认 <输出文件夹> 为字幕所在文件夹')
-        ttk.Button(file_body, text='选择', command=self.choose_out, style='Secondary.TButton').grid(
+        self.btn_choose_out = ttk.Button(
+            file_body, text='选择', command=self.choose_out, style='Secondary.TButton')
+        self.btn_choose_out.grid(
             row=1, column=2, sticky='ew', padx=(10, 0), pady=4)
 
         option_outer, option_card = create_card(self, '生成选项')
@@ -737,6 +756,8 @@ class BdnSupPanel(ttk.Frame):
         save_config(config)
 
     def choose_out(self):
+        if self.running:
+            return
         path = filedialog.askdirectory(title='选择输出文件夹', parent=self.winfo_toplevel())
         if path:
             self.out_var.set(normalize_display_path(path))
@@ -759,6 +780,8 @@ class BdnSupPanel(ttk.Frame):
             if widget is not None:
                 widget.config(state=state)
         self.ass_queue_list.set_running(running)
+        self.out_entry.config(state=state)
+        self.btn_choose_out.config(state=state)
         if running:
             self.started_at = time.time()
             self.elapsed_var.set('已用 00:00')
@@ -789,23 +812,6 @@ class BdnSupPanel(ttk.Frame):
                     os.remove(path)
             except OSError:
                 pass
-
-    def _validation_text(self, job):
-        info = job.get('validation_info') or {}
-        issues = job.get('validation_issues') or []
-        parts = [f'校验：BDN {info.get("events", 0)} 个事件']
-        if job.get('make_sup'):
-            parts.append(f'SUP {info.get("pcs", 0)} 个显示段')
-        if job.get('make_pes'):
-            parts.append('PES+MUI 已生成')
-        if info.get('last_ms') is not None:
-            parts.append('末事件 ' + format_ass_time(info['last_ms']))
-        elif info.get('last_tc'):
-            parts.append('末事件 ' + info['last_tc'])
-        text = '，'.join(parts)
-        if issues:
-            text += '\n告警：\n' + '\n'.join('· ' + issue for issue in issues)
-        return text
 
     def _expected_output_names(self, ass_path: str) -> list:
         stem = os.path.splitext(os.path.basename(ass_path))[0]
@@ -942,10 +948,8 @@ class BdnSupPanel(ttk.Frame):
         job_out = job['out_dir']
 
         def worker():
-            info = {}
-            issues = []
             try:
-                ok, message, outputs = generate_bdn_sup(
+                ok, message, _outputs = generate_bdn_sup(
                     job_path, job_out,
                     fmt=fmt,
                     fps=fps,
@@ -960,41 +964,38 @@ class BdnSupPanel(ttk.Frame):
                 )
                 if ok:
                     try:
-                        info, issues = validate_bdn_sup(
+                        _info, issues = validate_bdn_sup(
                             job_path, job_out, make_sup, make_pes)
+                        if issues:
+                            log_exception(
+                                f'BDN/SUP 校验：{os.path.basename(job_path)}：'
+                                + '；'.join(issues))
                     except Exception as exc:
                         log_exception('校验 BDN/SUP', exc)
-                        info, issues = {}, [f'校验失败：{exc}']
             except RenderCancelled:
                 self._cleanup_cancelled(job_out, job_path)
                 self.queue.put(('cancelled',))
                 return
             except Exception as exc:
                 log_exception('生成 BDN/SUP', exc)
-                ok, message, outputs = False, str(exc), []
-            self.queue.put(('done', ok, message, outputs, info, issues))
+                ok, message = False, str(exc)
+            self.queue.put(('done', ok, message))
 
         threading.Thread(target=worker, daemon=True).start()
         self.after(100, self._poll)
 
-    def _sup_job_finished(self, ok, message, outputs, info=None, issues=None):
+    def _sup_job_finished(self, ok, message):
         job = self.current_sup_job
         if ok:
             self.sup_batch_success += 1
             if job is not None:
-                job['validation_info'] = info or {}
-                job['validation_issues'] = issues or []
                 self._set_ass_queue_status(self.sup_job_index, '完成')
                 self._set_ass_queue_progress(self.sup_job_index, 100)
             if not self.sup_batch:
                 self._set_running(False)
                 self.status_var.set('生成完成')
-                lines = ['已生成：'] + list(outputs)
-                if job is not None:
-                    lines += ['', self._validation_text(job)]
-                messagebox.showinfo(
-                    '生成完成', '\n'.join(lines),
-                    parent=self.winfo_toplevel())
+                self._show_generation_result(
+                    1, 1, [], job.get('out_dir', '') if job else '')
                 return
         else:
             if job is not None:
@@ -1003,56 +1004,43 @@ class BdnSupPanel(ttk.Frame):
             if not self.sup_batch:
                 self._set_running(False)
                 self.status_var.set('生成失败')
-                messagebox.showerror(
-                    '生成失败', message, parent=self.winfo_toplevel())
+                self._show_generation_result(
+                    1, 0, [(job['path'] if job else '', message)])
                 return
         self.sup_job_index += 1
         self._start_next_sup_job()
+
+    def _show_generation_result(self, total, success, failures, output_dir=''):
+        """统一的生成结果提示：重点只显示成功 / 失败。"""
+        failed = len(failures)
+        if failed:
+            lines = [f'共 {total} 个，成功 {success} 个，失败 {failed} 个。']
+            for path, message in failures[:5]:
+                name = os.path.basename(path) if path else '字幕'
+                reason = str(message).strip().splitlines()
+                reason = reason[0][:120] if reason else '未知错误'
+                lines.append(f'\n{name}\n{reason}')
+            if failed > 5:
+                lines.append(f'\n… 共 {failed} 个失败，详见错误日志。')
+            messagebox.showwarning(
+                '生成失败' if total == 1 else '生成完成（有失败）',
+                '\n'.join(lines), parent=self.winfo_toplevel())
+            return
+        text = '成功 1 个。' if total == 1 else f'成功 {success} 个。'
+        if output_dir:
+            text += f'\n\n输出文件夹：\n{output_dir}'
+        else:
+            text += '\n\n可在「打开输出文件夹」中查看结果。'
+        messagebox.showinfo(
+            '生成成功', text, parent=self.winfo_toplevel())
 
     def _finish_sup_batch(self):
         self._set_running(False)
         self.sup_batch = False
         total = len(self.sup_jobs)
-        failures = self.sup_batch_failures
         self.status_var.set(f'队列完成：成功 {self.sup_batch_success}/{total}')
-        lines = [
-            f'队列完成：共 {total} 个，成功 {self.sup_batch_success} 个，'
-            f'失败 {len(failures)} 个。'
-        ]
-        if failures:
-            lines.append('')
-            for path, message in failures[:6]:
-                lines.append(f'· {os.path.basename(path)}：{message}')
-            if len(failures) > 6:
-                lines.append(f'· … 共 {len(failures)} 个失败')
-            messagebox.showerror(
-                '队列完成（有失败）', '\n'.join(lines),
-                parent=self.winfo_toplevel())
-            return
-        output_dirs = [job['out_dir'] for job in self.sup_jobs]
-        warnings = [
-            (job, job.get('validation_issues') or [])
-            for job in self.sup_jobs if job.get('validation_issues')
-        ]
-        if warnings:
-            lines.append('')
-            lines.append(f'校验告警：{len(warnings)} 个字幕')
-            for job, issues in warnings[:6]:
-                lines.append(
-                    f'· {os.path.basename(job["path"])}：' + '；'.join(issues))
-            if len(warnings) > 6:
-                lines.append(f'· … 共 {len(warnings)} 个')
-        else:
-            lines.append('')
-            lines.append('校验：BDN / SUP 输出均通过')
-        lines.append('')
-        lines.append('输出文件夹：')
-        for path in output_dirs[:6]:
-            lines.append('· ' + path)
-        if len(output_dirs) > 6:
-            lines.append(f'· … 共 {len(output_dirs)} 个')
-        messagebox.showinfo(
-            '队列完成', '\n'.join(lines), parent=self.winfo_toplevel())
+        self._show_generation_result(
+            total, self.sup_batch_success, self.sup_batch_failures)
 
     def _sup_cancelled(self):
         if self.current_sup_job is not None:
@@ -1088,7 +1076,7 @@ class BdnSupPanel(ttk.Frame):
                     self._sup_cancelled()
                     return
                 elif kind == 'done':
-                    self._sup_job_finished(item[1], item[2], item[3], item[4], item[5])
+                    self._sup_job_finished(item[1], item[2])
                     return
         except queue.Empty:
             pass

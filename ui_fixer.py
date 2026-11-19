@@ -3,10 +3,13 @@
 
 import os
 import io
+import re
 import json
 import csv
 import queue
+import shutil
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -14,7 +17,7 @@ from config_store import load_config, log_exception, save_config
 
 import theme_ui
 from theme_ui import (
-    ToolTip, UI_ACCENT, UI_BG, UI_BODY_SIZE,
+    ToolTip, UI_BG, UI_BODY_SIZE,
     UI_CARD, UI_CONFIRM, UI_DANGER, UI_FIELD, UI_FIELD_BORDER,
     UI_FONT, UI_MUTED, UI_SELECT, UI_SMALL_SIZE,
     UI_TEXT, add_combo_arrow, create_card,
@@ -22,10 +25,15 @@ from theme_ui import (
 )
 from reports import NOTICES_DATA_NAME, parse_issue_entries
 from subtitle_core import (
-    EDIT_SOURCE_PREFIX, format_ass_time, normalize_glossary, parse_ass_time,
-    process_file, srt_to_ass,
+    EDIT_SOURCE_PREFIX, convert_cht_contents,
+    format_ass_time, has_special_effect, match_cjk, normalize_glossary,
+    parse_ass_time, process_file, srt_to_ass,
 )
 from bdn_sup import read_ass_text
+
+BACKUP_ROOT = os.path.join(
+    os.environ.get('LOCALAPPDATA') or os.path.expanduser('~'),
+    'ohMyAssNoto', 'backups')
 
 theme_ui.register_theme_namespace(globals())
 
@@ -352,12 +360,15 @@ class IssueFixerPanel(ttk.Frame):
         self.data = None
         self.output_dir = ''
         self.source_path = ''
+        self.primary_output = ''
         self.source_is_srt = False
         self.dialogues = []
         self.source_lines = []
         self.styles = []
         self.entries = {}
         self.edits = {}
+        self.backup_dir = ''
+        self.undo_stack = []
         self.dirty = False
         self.running = False
         self.save_queue = queue.Queue()
@@ -366,7 +377,7 @@ class IssueFixerPanel(ttk.Frame):
     def build_ui(self):
         create_hero(
             self, '问题修复',
-            '按「请处理 / 请确认」逐条修改，并重新生成全部字幕。',
+            '按「请处理 / 请确认」逐条修改；双语片源以简英双语为基础，单语片源以简体中文为基础。',
         ).pack(fill='x', pady=(0, 10))
 
         file_outer, file_body = create_card(self, '问题数据')
@@ -434,6 +445,10 @@ class IssueFixerPanel(ttk.Frame):
         self.tree.tag_configure('process', foreground=UI_DANGER)
         self.tree.tag_configure('verify', foreground=UI_CONFIRM)
         self.tree.bind('<<TreeviewSelect>>', self.on_select)
+        self.row_menu = tk.Menu(self.tree, tearoff=0)
+        self.row_menu.add_command(
+            label='删除字幕条', command=self.delete_selected_row)
+        self.tree.bind('<Button-3>', self._show_row_menu)
 
         bottom = tk.Frame(list_body, bg=UI_CARD)
         bottom.grid(row=1, column=0, sticky='ew', pady=(8, 0))
@@ -469,7 +484,7 @@ class IssueFixerPanel(ttk.Frame):
         text_frame.grid(row=0, column=1, sticky='nsew', padx=(16, 0))
         text_frame.columnconfigure(0, weight=1)
         text_frame.rowconfigure(0, weight=1)
-        text_border = tk.Frame(text_frame, bg=UI_FIELD_BORDER)
+        text_border = ttk.Frame(text_frame, style='Field.TFrame')
         text_border.grid(row=0, column=0, sticky='nsew')
         text_border.rowconfigure(0, weight=1)
         text_border.columnconfigure(0, weight=1)
@@ -480,25 +495,35 @@ class IssueFixerPanel(ttk.Frame):
             selectforeground=UI_TEXT, relief='flat', bd=0,
             highlightthickness=0, padx=8, pady=6,
         )
-        self.text_edit.grid(row=0, column=0, sticky='nsew', padx=1, pady=1)
+        # 内缩 2px：让 Entry.field 的 bordercolor + lightcolor 两层都露出来，
+        # 聚焦时与 TEntry 一样显示 2px 强调色边框。
+        self.text_edit.grid(row=0, column=0, sticky='nsew', padx=2, pady=2)
         self.text_edit.bind(
-            '<FocusIn>', lambda event: text_border.configure(bg=UI_ACCENT))
+            '<FocusIn>',
+            lambda event: text_border.configure(style='FieldFocus.TFrame'))
         self.text_edit.bind(
-            '<FocusOut>', lambda event: text_border.configure(bg=UI_FIELD_BORDER))
-        tk.Label(
+            '<FocusOut>',
+            lambda event: text_border.configure(style='Field.TFrame'))
+        self.save_hint = tk.Label(
             bottom,
-            text='保存会重新生成整个输出文件夹；繁体中文会重新经过繁化姬。原字幕文件不会被修改。',
+            text='载入问题数据后可保存修改；双语片源以简英双语为基础，单语片源以简体中文为基础。',
             bg=UI_CARD, fg=UI_MUTED, font=(UI_FONT, UI_SMALL_SIZE),
-        ).grid(row=1, column=0, columnspan=2, sticky='w', pady=(6, 0))
+        )
+        self.save_hint.grid(row=1, column=0, columnspan=2, sticky='w', pady=(6, 0))
 
         action = tk.Frame(self, bg=UI_BG)
         action.pack(side='bottom', fill='x', pady=(8, 8))
         self.btn_apply = ttk.Button(
             action, text='应用修改', command=self.apply_current,
             style='Secondary.TButton', state='disabled')
-        self.btn_apply.pack(side='right', padx=(0, 20))
+        self.btn_apply.pack(side='right', padx=(0, 8))
+        self.btn_undo = ttk.Button(
+            action, text='撤回', command=self.undo_last,
+            style='Secondary.TButton', state='disabled')
+        self.btn_undo.pack(side='right', padx=(0, 20))
+        ToolTip(self.btn_undo, '撤回上一步「应用修改」；如果上一步是删除字幕条，则从备份恢复并重新分析。')
         self.btn_save = ttk.Button(
-            action, text='保存并重新生成', command=self.save_and_regenerate,
+            action, text='保存并同步', command=self.save_and_regenerate,
             style='Accent.TButton', state='disabled')
         self.btn_save.pack(side='left')
         self.btn_reload = ttk.Button(
@@ -514,6 +539,8 @@ class IssueFixerPanel(ttk.Frame):
         state = 'normal' if enabled else 'disabled'
         for button in (self.btn_apply, self.btn_save, self.btn_reload):
             button.config(state=state)
+        self.btn_undo.config(
+            state='normal' if enabled and self.undo_stack else 'disabled')
 
     def _status(self, text: str):
         self.status_var.set(text)
@@ -542,7 +569,351 @@ class IssueFixerPanel(ttk.Frame):
             return
         self.load(os.path.join(self.output_dir, NOTICES_DATA_NAME))
 
-    def load(self, path: str, silent: bool = False):
+    def _update_save_mode(self):
+        if self.primary_output:
+            self.btn_save.config(text='保存并同步')
+            self.save_hint.config(
+                text='保存会写回主字幕，并同步简体 / 繁体 / 英文等其他语言文件，然后重新分析生成问题报告。')
+        else:
+            self.btn_save.config(text='保存并重新生成')
+            self.save_hint.config(
+                text='保存会重新生成整个输出文件夹；繁体中文会重新经过繁化姬。原字幕文件不会被修改。')
+
+    def _primary_output_path(self, data):
+        """生成后的主字幕：简英双语；单语片源用简体中文。"""
+        output_dir = str(data.get('output_dir') or '')
+        if not output_dir:
+            return ''
+        names = []
+        if data.get('is_hdr'):
+            names += ['1-简英双语-HDR-zh.ass', '1-简体中文-HDR-zh.ass']
+        names += ['1-简英双语-zh.ass', '1-简体中文-zh.ass']
+        for name in names:
+            path = os.path.join(output_dir, name)
+            if os.path.isfile(path):
+                return path
+        return ''
+
+    @staticmethod
+    def _leading_tags(text):
+        match = re.match(r'^((?:\{[^}]*\})+)?', text)
+        return match.group(1) if match and match.group(1) else ''
+
+    @staticmethod
+    def _strip_leading_tags(text):
+        return re.sub(r'^(?:\{[^}]*\})+', '', text)
+
+    @staticmethod
+    def _visible_text(text):
+        return re.sub(r'\{[^}]*\}', '', text)
+
+    def _split_languages(self, text):
+        """把双语文本按可见文字拆成 (中文部分, 英文部分)。"""
+        chinese = []
+        english = []
+        for part in text.split('\\N'):
+            visible = self._visible_text(part)
+            if match_cjk.search(visible) or not re.search(r'[A-Za-z]', visible):
+                chinese.append(part)
+            else:
+                english.append(part)
+        return '\\N'.join(chinese), '\\N'.join(english)
+
+    @staticmethod
+    def _dialogue_records(lines):
+        records = []
+        for index, line in enumerate(lines):
+            if not line.lstrip().lower().startswith('dialogue:'):
+                continue
+            fields = line.split(',', 9)
+            if len(fields) < 10:
+                continue
+            records.append((index, fields, has_special_effect(fields[9])))
+        return records
+
+    def _start_backup_batch(self):
+        stamp = time.strftime('%Y%m%d_%H%M%S')
+        folder = os.path.join(BACKUP_ROOT, stamp)
+        counter = 1
+        while os.path.exists(folder):
+            folder = os.path.join(BACKUP_ROOT, f'{stamp}_{counter}')
+            counter += 1
+        try:
+            os.makedirs(folder, exist_ok=True)
+            self.backup_dir = folder
+            batches = sorted(
+                (name for name in os.listdir(BACKUP_ROOT)
+                 if os.path.isdir(os.path.join(BACKUP_ROOT, name))),
+                reverse=True)
+            for old in batches[10:]:
+                shutil.rmtree(os.path.join(BACKUP_ROOT, old), ignore_errors=True)
+        except OSError:
+            self.backup_dir = ''
+
+    def _write_ass_lines(self, path, lines):
+        if self.backup_dir:
+            try:
+                os.makedirs(self.backup_dir, exist_ok=True)
+                shutil.copy2(path, os.path.join(self.backup_dir, os.path.basename(path)))
+            except OSError as exc:
+                log_exception('备份字幕文件', exc)
+        else:
+            shutil.copy2(path, path + '.bak')
+        with open(path, 'w', encoding='utf-8-sig', newline='') as handle:
+            handle.write('\n'.join(lines))
+
+    @staticmethod
+    def _target_specs(is_bilingual):
+        if is_bilingual:
+            return [
+                ('2-简体中文-zh.ass', 'chs'),
+                ('3-繁体中文-zh.ass', 'cht'),
+                ('4-英文-en.ass', 'eng'),
+                ('2-简英双语-SDR-zh.ass', 'sdr'),
+                ('3-简体中文-HDR-zh.ass', 'chs'),
+                ('4-繁体中文-HDR-zh.ass', 'cht'),
+                ('5-英文-HDR-en.ass', 'eng'),
+            ]
+        return [
+            ('2-简体中文-zh.ass', 'chs'),
+            ('2-繁体中文-zh.ass', 'cht'),
+            ('2-简体中文-SDR-zh.ass', 'sdr'),
+            ('3-繁体中文-HDR-zh.ass', 'cht'),
+        ]
+
+    def _sync_outputs(self, lines):
+        """把主字幕的文本同步到其他语言文件，返回已同步文件名。"""
+        primary = self.primary_output
+        out_dir = os.path.dirname(primary)
+        is_bilingual = os.path.basename(primary).startswith('1-简英双语')
+        primary_records = self._dialogue_records(lines)
+        targets = self._target_specs(is_bilingual)
+        meta = dict(self.data.get('meta') or {})
+        chinese_entries = []
+        english_entries = []
+        full_entries = []
+        for _index, fields, special in primary_records:
+            entry = (fields[1], fields[2], fields[9])
+            full_entries.append(entry)
+            if special:
+                chinese_entries.append(entry)
+                continue
+            if is_bilingual:
+                chinese, english = self._split_languages(fields[9])
+                if chinese:
+                    chinese_entries.append((fields[1], fields[2], chinese))
+                if english:
+                    english_entries.append((fields[1], fields[2], english))
+            else:
+                chinese_entries.append(entry)
+        synced = []
+        for name, role in targets:
+            path = os.path.join(out_dir, name)
+            if not os.path.isfile(path):
+                continue
+            text = read_ass_text(path)
+            if not text:
+                continue
+            target_lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+            target_records = self._dialogue_records(target_lines)
+            if role in ('chs', 'cht'):
+                entries = chinese_entries
+            elif role == 'eng':
+                entries = english_entries
+            else:
+                entries = full_entries
+            if len(entries) != len(target_records):
+                log_exception(
+                    f'同步跳过：{name}（主字幕 {len(entries)} 行，目标 {len(target_records)} 行）')
+                continue
+            for (target_index, target_fields, _special), (start, end, new_text) in zip(
+                    target_records, entries):
+                if role == 'eng':
+                    prefix = self._leading_tags(target_fields[9]) or '{\\blur2}'
+                    new_text = prefix + self._strip_leading_tags(new_text)
+                target_fields[1] = start
+                target_fields[2] = end
+                target_fields[9] = new_text
+                target_lines[target_index] = ','.join(target_fields)
+            if role == 'cht':
+                try:
+                    target_lines, _changes, _error, _overlong = convert_cht_contents(
+                        target_lines, use_api=bool(meta.get('taiwan', True)))
+                except Exception as exc:
+                    log_exception('同步繁体字幕', exc)
+            self._write_ass_lines(path, target_lines)
+            synced.append(name)
+        return synced
+
+    def _delete_from_outputs(self, lines, position):
+        """从其他语言文件中删除与主字幕第 position 条对应的行。"""
+        primary = self.primary_output
+        out_dir = os.path.dirname(primary)
+        is_bilingual = os.path.basename(primary).startswith('1-简英双语')
+        records = self._dialogue_records(lines)
+        if not (0 <= position < len(records)):
+            return [], []
+        chinese_positions = []
+        english_positions = []
+        for pos, (_index, fields, is_special) in enumerate(records):
+            if is_special:
+                chinese_positions.append(pos)
+                continue
+            if is_bilingual:
+                chinese, english = self._split_languages(fields[9])
+                if chinese:
+                    chinese_positions.append(pos)
+                if english:
+                    english_positions.append(pos)
+            else:
+                chinese_positions.append(pos)
+        deleted = []
+        skipped = []
+        for name, role in self._target_specs(is_bilingual):
+            path = os.path.join(out_dir, name)
+            if not os.path.isfile(path):
+                continue
+            if role in ('chs', 'cht'):
+                sequence = chinese_positions
+            elif role == 'eng':
+                sequence = english_positions
+            else:
+                sequence = list(range(len(records)))
+            if position not in sequence:
+                continue
+            text = read_ass_text(path)
+            if not text:
+                continue
+            target_lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+            target_records = self._dialogue_records(target_lines)
+            if len(target_records) != len(sequence):
+                skipped.append(name)
+                log_exception(
+                    f'删除同步跳过：{name}（主字幕 {len(sequence)} 行，目标 {len(target_records)} 行）')
+                continue
+            ordinal = sequence.index(position)
+            line_index = target_records[ordinal][0]
+            del target_lines[line_index]
+            try:
+                self._write_ass_lines(path, target_lines)
+            except OSError as exc:
+                skipped.append(name)
+                log_exception(f'删除同步失败：{name}', exc)
+                continue
+            deleted.append(name)
+        return deleted, skipped
+
+    def _show_row_menu(self, event):
+        row = self.tree.identify_row(event.y)
+        if not row:
+            return
+        self.tree.selection_set(row)
+        self.tree.focus(row)
+        self.on_select()
+        enabled = bool(self.data) and not self.running and not self.dirty
+        self.row_menu.entryconfigure(0, state='normal' if enabled else 'disabled')
+        try:
+            self.row_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.row_menu.grab_release()
+
+    def delete_selected_row(self):
+        if self.running or not self.data:
+            return
+        if self.dirty or self.edits:
+            messagebox.showinfo(
+                '请先保存', '请先保存当前修改，再删除字幕条。',
+                parent=self.winfo_toplevel())
+            return
+        selection = self.tree.selection()
+        if not selection:
+            return
+        index = int(selection[0])
+        if index not in self.entries:
+            return
+        _start, _end, _style, _text, preview = self._entry_values(index)
+        if not messagebox.askyesno(
+                '删除字幕条',
+                f'确定删除第 {index} 条字幕吗？\n\n{preview[:160]}\n\n'
+                '所有语言字幕中的对应行都会删除，并重新分析问题。',
+                parent=self.winfo_toplevel()):
+            return
+        position = index - 1
+        if not (0 <= position < len(self.dialogues)):
+            return
+        original_lines = list(self.source_lines)
+        line_index = self.dialogues[position]
+        if not (0 <= line_index < len(original_lines)):
+            return
+        new_lines = list(original_lines)
+        del new_lines[line_index]
+        self._start_backup_batch()
+        try:
+            self._write_ass_lines(self.primary_output, new_lines)
+        except OSError as exc:
+            messagebox.showerror(
+                '删除失败', str(exc), parent=self.winfo_toplevel())
+            return
+        self.source_lines = new_lines
+        self.running = True
+        self._buttons(False)
+        self._status('正在同步删除并重新分析…')
+        self.save_queue = queue.Queue()
+
+        def worker():
+            deleted = []
+            skipped = []
+            sync_error = ''
+            try:
+                deleted, skipped = self._delete_from_outputs(
+                    original_lines, position)
+            except Exception as exc:
+                sync_error = str(exc)
+                log_exception('删除同步其他语言字幕', exc)
+            analysed = True
+            try:
+                self._reanalyse_primary()
+            except Exception as exc:
+                analysed = False
+                log_exception('删除后重新分析', exc)
+            self.save_queue.put((
+                'delete_done', index, line_index, deleted, skipped,
+                sync_error, analysed))
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.after(150, self._poll_save)
+
+    def _cleanup_legacy_baks(self):
+        """清理旧版本在输出目录留下的同名 .bak 文件。"""
+        if not self.output_dir or not self.primary_output or not self.backup_dir:
+            return
+        is_bilingual = os.path.basename(self.primary_output).startswith('1-简英双语')
+        names = {os.path.basename(self.primary_output)}
+        names.update(name for name, _role in self._target_specs(is_bilingual))
+        for name in names:
+            path = os.path.join(self.output_dir, name + '.bak')
+            if os.path.isfile(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+    def _reanalyse_primary(self):
+        meta = dict(self.data.get('meta') or {})
+        meta['title'] = self.data.get('title', '')
+        meta['output_root'] = os.path.dirname(self.output_dir)
+        meta['source_label'] = (
+            self.data.get('source_label')
+            or os.path.basename(self.primary_output))
+        process_file(
+            self.primary_output,
+            bool(self.data.get('is_hdr')),
+            bool(self.data.get('is_mid_black')),
+            meta,
+            write_outputs=False,
+        )
+
+    def load(self, path: str, silent: bool = False, reset_undo: bool = True):
         if path.lower().endswith('.html'):
             path = os.path.join(os.path.dirname(path), NOTICES_DATA_NAME)
         try:
@@ -562,22 +933,29 @@ class IssueFixerPanel(ttk.Frame):
                     f'问题数据格式不正确。\n\n请先用当前版本重新生成一次字幕，输出文件夹里会生成「{NOTICES_DATA_NAME}」。',
                     parent=self.winfo_toplevel())
             return
-        source_path = str(data.get('source') or '')
+        primary_output = self._primary_output_path(data)
+        source_path = primary_output or str(data.get('source') or '')
+        text = read_ass_text(source_path) if source_path else ''
+        if primary_output and not text:
+            # 生成文件读不到时退回原始字幕
+            primary_output = ''
+            source_path = str(data.get('source') or '')
+            text = read_ass_text(source_path)
         if not os.path.isfile(source_path):
             if not silent:
                 messagebox.showerror(
                     '找不到源字幕', f'源文件不存在：\n{source_path}', parent=self.winfo_toplevel())
             return
-        text = read_ass_text(source_path)
         if not text:
             if not silent:
                 messagebox.showerror(
                     '无法读取源字幕', '源字幕为空或无法识别编码', parent=self.winfo_toplevel())
             return
-        # SRT 源同样要按 ASS 行号定位对白
+        # 只有退回原始 SRT 时才需要转换；生成后的主字幕已经是 ASS
         source_is_srt = (
-            source_path.lower().endswith('.srt')
-            or ('[Events]' not in text and '-->' in text))
+            not primary_output
+            and (source_path.lower().endswith('.srt')
+                 or ('[Events]' not in text and '-->' in text)))
         if source_is_srt:
             text = srt_to_ass(text)
         lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
@@ -610,6 +988,7 @@ class IssueFixerPanel(ttk.Frame):
         self.data = data
         self.output_dir = str(data.get('output_dir') or os.path.dirname(path))
         self.source_path = source_path
+        self.primary_output = primary_output
         self.source_is_srt = source_is_srt
         self.dialogues = dialogues
         self.source_lines = lines
@@ -617,7 +996,10 @@ class IssueFixerPanel(ttk.Frame):
         self.style_combo.configure(values=styles)
         self.entries = entries
         self.edits = {}
+        if reset_undo:
+            self.undo_stack.clear()
         self.dirty = False
+        self._update_save_mode()
         self.path_var.set(path)
         self._buttons(True)
         self.refresh_tree(select=next(iter(sorted(entries)), None))
@@ -635,7 +1017,7 @@ class IssueFixerPanel(ttk.Frame):
             end = parse_ass_time(fields[2]) or 0
             style = fields[3].strip()
             text = fields[9]
-        preview = text.replace('\\N', ' / ').replace('\n', ' / ')
+        preview = text.replace('\r', '').replace('\n', '\\N')
         return start, end, style, text, preview
 
     def refresh_tree(self, select=None):
@@ -691,10 +1073,73 @@ class IssueFixerPanel(ttk.Frame):
         if not result:
             return
         index, edit = result
+        previous = self.edits.get(index)
+        self.undo_stack.append((
+            'edit', index, dict(previous) if previous is not None else None))
+        if len(self.undo_stack) > 10:
+            self.undo_stack.pop(0)
         self.edits[index] = edit
         self.dirty = True
+        self.btn_undo.config(state='normal')
         self.refresh_tree(select=index)
-        self._status(f'已修改 {len(self.edits)} 条 · 点「保存并重新生成」写入字幕')
+        self._status(
+            f'已修改 {len(self.edits)} 条 · 点「{self.btn_save.cget("text")}」写入字幕')
+
+    def _restore_backup(self, backup_dir):
+        if not backup_dir or not os.path.isdir(backup_dir):
+            raise OSError(f'备份目录不存在：{backup_dir or "（无）"}')
+        if not self.output_dir or not os.path.isdir(self.output_dir):
+            raise OSError('输出目录不存在，无法恢复备份')
+        restored = 0
+        for name in os.listdir(backup_dir):
+            if not name.lower().endswith('.ass'):
+                continue
+            source = os.path.join(backup_dir, name)
+            if not os.path.isfile(source):
+                continue
+            shutil.copy2(source, os.path.join(self.output_dir, name))
+            restored += 1
+        if not restored:
+            raise OSError('备份目录里没有字幕文件')
+
+    def undo_last(self):
+        if self.running or not self.undo_stack:
+            return
+        action = self.undo_stack.pop()
+        if action[0] == 'edit':
+            _kind, index, previous = action
+            if previous is None:
+                self.edits.pop(index, None)
+            else:
+                self.edits[index] = previous
+            self.dirty = bool(self.edits)
+            self.refresh_tree(select=index)
+            try:
+                self.tree.selection_set(str(index))
+                self.on_select()
+            except tk.TclError:
+                pass
+            self._buttons(True)
+            self._status('已撤回上一步修改')
+            return
+        _kind, backup_dir, label = action
+        self.running = True
+        self._buttons(False)
+        self._status(f'正在撤回：{label}…')
+        self.save_queue = queue.Queue()
+
+        def worker():
+            error = ''
+            try:
+                self._restore_backup(backup_dir)
+                self._reanalyse_primary()
+            except Exception as exc:
+                error = str(exc)
+                log_exception('撤回操作', exc)
+            self.save_queue.put(('undo_done', label, error))
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.after(150, self._poll_save)
 
     def save_and_regenerate(self):
         if self.running or not self.data:
@@ -736,6 +1181,10 @@ class IssueFixerPanel(ttk.Frame):
                 fields[3] = edit['style']
             fields[9] = edit['text']
             lines[line_index] = ','.join(fields)
+
+        if self.primary_output:
+            self._save_primary_lines(lines)
+            return
 
         output_dir = self.output_dir or str(self.data.get('output_dir') or '')
         if not output_dir:
@@ -780,6 +1229,46 @@ class IssueFixerPanel(ttk.Frame):
         threading.Thread(target=worker, daemon=True).start()
         self.after(150, self._poll_save)
 
+    def _save_primary_lines(self, lines):
+        target = self.primary_output
+        if not target or not os.path.isfile(target):
+            messagebox.showerror(
+                '保存失败', '生成后的字幕文件不存在，请重新生成一次字幕',
+                parent=self.winfo_toplevel())
+            return
+        self._start_backup_batch()
+        try:
+            self._write_ass_lines(target, lines)
+        except OSError as exc:
+            messagebox.showerror(
+                '保存失败', str(exc), parent=self.winfo_toplevel())
+            return
+        self.source_lines = list(lines)
+        self.running = True
+        self._buttons(False)
+        self._status('正在同步其他语言字幕…')
+        self.save_queue = queue.Queue()
+
+        def worker():
+            synced = []
+            sync_error = ''
+            try:
+                synced = self._sync_outputs(lines)
+            except Exception as exc:
+                sync_error = str(exc)
+                log_exception('同步其他语言字幕', exc)
+            analysed = True
+            try:
+                self._reanalyse_primary()
+            except Exception as exc:
+                analysed = False
+                log_exception('问题修复重新分析', exc)
+            self.save_queue.put(
+                ('primary_done', synced, sync_error, analysed, target))
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.after(150, self._poll_save)
+
     def _poll_save(self):
         try:
             item = self.save_queue.get_nowait()
@@ -788,6 +1277,98 @@ class IssueFixerPanel(ttk.Frame):
             return
         self.running = False
         self._buttons(True)
+        if item[0] == 'primary_done':
+            _kind, synced, sync_error, analysed, target = item
+            self.dirty = False
+            self.undo_stack.clear()
+            if analysed:
+                json_path = os.path.join(self.output_dir, NOTICES_DATA_NAME)
+                if os.path.isfile(json_path):
+                    self.load(json_path, silent=True, reset_undo=False)
+            self._buttons(True)
+            summary = '、'.join(synced) if synced else '没有需要同步的其他语言文件'
+            self._status(f'已保存并同步：{summary}')
+            lines = [
+                f'已写回：\n{target}',
+                f'已同步：{summary}',
+            ]
+            if sync_error:
+                lines.append(f'同步失败：{sync_error}')
+            lines.append(
+                '问题报告已重新分析。' if analysed
+                else '问题报告未能重新分析，详见错误日志。')
+            if self.backup_dir:
+                lines.append(f'备份：{self.backup_dir}')
+            self._cleanup_legacy_baks()
+            if sync_error or not analysed:
+                messagebox.showwarning(
+                    '保存完成（部分失败）', '\n\n'.join(lines),
+                    parent=self.winfo_toplevel())
+            else:
+                messagebox.showinfo(
+                    '保存完成', '\n\n'.join(lines),
+                    parent=self.winfo_toplevel())
+            return
+        if item[0] == 'delete_done':
+            (_kind, index, line_index, deleted, skipped,
+             sync_error, analysed) = item
+            self.dirty = False
+            if analysed:
+                json_path = os.path.join(self.output_dir, NOTICES_DATA_NAME)
+                if os.path.isfile(json_path):
+                    self.load(json_path, silent=True, reset_undo=False)
+            else:
+                self.dialogues = [
+                    pos if pos < line_index else pos - 1
+                    for pos in self.dialogues if pos != line_index]
+                self.entries.pop(index, None)
+                self.refresh_tree()
+            if self.backup_dir:
+                self.undo_stack.append(('restore', self.backup_dir, f'删除第 {index} 条'))
+                if len(self.undo_stack) > 10:
+                    self.undo_stack.pop(0)
+            self._buttons(True)
+            summary = '、'.join(deleted) if deleted else '没有需要同步的其他语言文件'
+            lines = [
+                f'已删除第 {index} 条字幕。',
+                f'同步：{summary}',
+            ]
+            if skipped:
+                lines.append(f'跳过：{"、".join(skipped)}')
+            if sync_error:
+                lines.append(f'同步失败：{sync_error}')
+            lines.append(
+                '问题报告已重新分析。' if analysed
+                else '问题报告未能重新分析，详见错误日志。')
+            if self.backup_dir:
+                lines.append(f'备份：{self.backup_dir}')
+            self._cleanup_legacy_baks()
+            self._status('已删除字幕条')
+            if sync_error or skipped or not analysed:
+                messagebox.showwarning(
+                    '删除完成（部分失败）', '\n\n'.join(lines),
+                    parent=self.winfo_toplevel())
+            else:
+                messagebox.showinfo(
+                    '删除完成', '\n\n'.join(lines),
+                    parent=self.winfo_toplevel())
+            return
+        if item[0] == 'undo_done':
+            _kind, label, error = item
+            if error:
+                self._status('撤回失败')
+                messagebox.showerror(
+                    '撤回失败', error, parent=self.winfo_toplevel())
+                return
+            json_path = os.path.join(self.output_dir, NOTICES_DATA_NAME)
+            if os.path.isfile(json_path):
+                self.load(json_path, silent=True, reset_undo=False)
+            self._status(f'已撤回：{label}')
+            messagebox.showinfo(
+                '撤回完成',
+                f'已撤回：{label}\n字幕文件与问题报告已恢复。',
+                parent=self.winfo_toplevel())
+            return
         if item[0] == 'error':
             self._status('重新生成失败')
             messagebox.showerror('重新生成失败', item[1], parent=self.winfo_toplevel())

@@ -452,6 +452,24 @@ class App:
             darkcolor=[('readonly', UI_FIELD), ('focus', UI_ACCENT)],
             fieldbackground=[('readonly', UI_FIELD)],
         )
+        # 多行编辑框使用与 TEntry 相同的主题 field 边框
+        field_layout = [
+            ('Entry.field', {'sticky': 'nswe', 'border': '1', 'children': [
+                ('Entry.padding', {'sticky': 'nswe'}),
+            ]}),
+        ]
+        for field_style in ('Field.TFrame', 'FieldFocus.TFrame'):
+            style.layout(field_style, field_layout)
+        style.configure(
+            'Field.TFrame', fieldbackground=UI_FIELD,
+            bordercolor=UI_FIELD_BORDER, lightcolor=UI_FIELD,
+            darkcolor=UI_FIELD, padding=0,
+        )
+        style.configure(
+            'FieldFocus.TFrame', fieldbackground=UI_FIELD,
+            bordercolor=UI_ACCENT, lightcolor=UI_ACCENT,
+            darkcolor=UI_ACCENT, padding=0,
+        )
         style.configure(
             'Placeholder.TEntry', fieldbackground=UI_FIELD,
             background=UI_FIELD, foreground=UI_MUTED,
@@ -658,7 +676,7 @@ class App:
         card = RoundedFrame(parent, radius=8)
         card.configure(cursor='hand2')
         padx = (0, px(12)) if column == 0 else (px(12), 0)
-        pady = (0, px(12)) if row == 0 else (0, 0)
+        pady = (0, px(12)) if row < 2 else (0, 0)
         card.grid(row=row, column=column, sticky='nsew', padx=padx, pady=pady)
         inner = tk.Frame(card.body, bg=UI_CARD, padx=px(20), pady=px(18))
         inner.pack(fill='both', expand=True)
